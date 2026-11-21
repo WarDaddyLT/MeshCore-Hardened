@@ -1,5 +1,9 @@
 # MeshCore Hardened
 
+![Project goal for MeshCore Hardened, showing trusted repeaters sharing policy and an administrator managing the network from the MeshCore app.](docs/_assets/MeshCore%20Hardened%20Network%20Infographic.png)
+
+*Project goal.* This diagram shows the intended network and administrator experience. See [validation status](#validation-provenance-and-license) for what has been verified on hardware.
+
 MeshCore Hardened is repeater firmware for LoRa MeshCore networks. It retains the SaveMeshcore packet filters and adds persistent per-key rules, private direct-neighbour notices, encrypted policy synchronization between trusted repeaters, and an optional read-only administration room. Run official MeshCore firmware on your companion radios.
 
 > [!IMPORTANT]
