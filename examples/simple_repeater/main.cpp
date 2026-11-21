@@ -137,7 +137,16 @@ void loop() {
     if (c != '\n') {
       command[len++] = c;
       command[len] = 0;
-      Serial.print(c);
+      const char* entered = command;
+      while (*entered == ' ') ++entered;
+      if (strlen(entered) >= 3 && entered[2] == '|') entered += 3;
+      const char* args;
+      const char* secret;
+      bool secret_setting = (savemesh::matchCommand(entered, "neighbours", &args)
+                             && savemesh::matchCommand(args, "channel", &secret))
+                         || (savemesh::matchCommand(entered, "rules", &args)
+                             && savemesh::matchCommand(args, "sync.key", &secret));
+      if (!secret_setting || !*secret) Serial.print(c);
     }
     if (c == '\r') break;
   }
@@ -173,7 +182,7 @@ void loop() {
     char reply[160];
     reply[0] = 0;
     if (!ethernet_handle_command(ethernet_command, reply)) {
-      the_mesh.handleCommand(0, ethernet_command, reply);
+      the_mesh.handleCommand(0, ethernet_command, reply, nullptr, true);
     }
     ethernet_send_reply(reply);
     ethernet_command[0] = 0;

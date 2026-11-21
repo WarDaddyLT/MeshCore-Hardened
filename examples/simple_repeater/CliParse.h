@@ -53,6 +53,15 @@ inline char lowerAscii(char c) {
   return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
 }
 
+inline bool isHex(const char* text, size_t length) {
+  if (strlen(text) != length) return false;
+  for (; *text; ++text) {
+    char c = lowerAscii(*text);
+    if ((c < '0' || c > '9') && (c < 'a' || c > 'f')) return false;
+  }
+  return true;
+}
+
 // Parses "on" or "off" for the filter commands. Case-insensitive; trailing
 // spaces, tabs and line endings are ignored. Returns false for anything else.
 inline bool parseOnOff(const char* arg, uint8_t* value) {

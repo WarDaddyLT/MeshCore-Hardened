@@ -63,6 +63,7 @@ uint8_t Packet::writeTo(uint8_t dest[]) const {
 }
 
 bool Packet::readFrom(const uint8_t src[], uint8_t len) {
+  received_over_radio = false;
   uint8_t i = 0;
   header = src[i++];
   if (hasTransportCodes()) {

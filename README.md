@@ -1,240 +1,384 @@
 # MeshCore Hardened
 
-MeshCore Hardened is standalone repeater firmware based on the SaveMeshcore
-filtering patch for MeshCore. The [source baseline](docs/source-baseline.md)
-records the imported revision and its provenance.
+MeshCore Hardened is repeater firmware for LoRa MeshCore networks. It retains the SaveMeshcore packet filters and adds persistent per-key rules, private direct-neighbour notices, encrypted policy synchronization between trusted repeaters, and an optional read-only administration room. Run official MeshCore firmware on your companion radios.
 
-For companion, room server, or sensor firmware, use official MeshCore.
+> [!IMPORTANT]
+> A public-key blacklist can block a signed advertisement and restrict services addressed to this repeater. A stock private-channel text packet lacks a sender identity that a transit repeater can verify. In the bench run, the RAK3401 stopped forwarding the blacklisted M5's signed advert and continued forwarding its private group text. Use the channel and packet filters or the shared rate limit for traffic without a verifiable sender.
 
-The filter commands are available only in repeater firmware. Changes are saved immediately and remain active after reboot. Run a command without `on` or `off` to show its current state.
+## AI-Assisted Development Declaration
 
-### Enforced repeater settings
+This work was developed with the assistance of AI tools under the supervision of its authors and contributors.
 
-MeshCore Hardened keeps these safety settings within fixed limits. On every boot, an older or manually edited value outside the policy is repaired and saved before the radio and advertisement timers start. A CLI command outside the allowed range is rejected without changing the setting.
+AI-assisted implementation was subject to human direction, review, correction, and validation. The authors and contributors retain responsibility for their respective contributions, design decisions, quality control, and final approval of the work.
 
-| MeshCore setting | MeshCore Hardened policy |
+## Contents
+
+- [Install and configure](#install-and-configure)
+- [What the repeater does with a packet](#what-the-repeater-does-with-a-packet)
+- [Base filters and enforced settings](#base-filters-and-enforced-settings)
+- [Persistent rules and remote administration](#persistent-rules-and-remote-administration)
+- [Private direct-neighbour notices](#private-direct-neighbour-notices)
+- [Share signed rules between repeaters](#share-signed-rules-between-repeaters)
+- [Optional administration room](#optional-administration-room)
+- [Troubleshooting](#troubleshooting)
+- [Build and release](#build-and-release)
+- [Validation, provenance, and license](#validation-provenance-and-license)
+
+## Install and configure
+
+1. Identify the exact board and firmware target. For example, `RAK_3401_repeater` is the RAK3401 with the 1 W radio kit. The RAK4631 has a separate target. Use the board documentation or application USB identity to confirm the hardware. Some devices report a different model name in bootloader mode.
+2. Get the matching firmware and `SHA256SUMS.txt` from the [project releases](https://github.com/WarDaddyLT/MeshCore-Hardened/releases). If no release is listed, use the [release workflow or target build instructions](RELEASE.md). Check your downloaded file's SHA-256 against its entry. With the whole release folder downloaded, run `shasum -a 256 -c SHA256SUMS.txt`.
+3. Back up your settings or recovery material before changing firmware. Choose the board's application update procedure to retain its identity and settings. A factory erase clears the stored state on the erased partition.
+4. Flash the matching application image. An nRF52 board may accept UF2 or a serial DFU ZIP. ESP32 has an application BIN for a matching existing partition layout and a merged BIN for initial installation. The release guide lists the formats for all board families. The [MeshCore flasher](https://flasher.meshcore.io/) provides board-specific flashing controls, including custom firmware where supported.
+5. Open the repeater's USB serial console at **115200 baud** and send commands with a carriage return. In a terminal app, choose CR or CRLF for the line ending. Confirm the serial port from the application after flashing.
+
+A first inspection over USB is read-only.
+
+```text
+ver
+get name
+get public.key
+get radio
+get repeat
+filter
+rules status
+rules drops
+neighbours status
+rules sync status
+get admin.enabled
+```
+
+`get radio` returns frequency, bandwidth, spreading factor, and coding rate. Match the intended MeshCore network preset and configure permitted transmit power for your hardware and operating band. `set name <node-name>` sets the advertised name. `get repeat` reflects the saved forwarding setting. Use `set repeat on` to enable forwarding, or `set repeat off` to stop it. The USB console remains your recovery path. `advert.zerohop` sends a one-off local advert. `advert` sends a one-off flood. Follow the stock CLI reference for radio settings, region management, and basic diagnostics. [MeshCore CLI reference](docs/cli_commands.md)
+
+## What the repeater does with a packet
+
+The same physical radio handles stock MeshCore forwarding, encrypted management addressed to the repeater, and optional Hardened messages. The primary key is the normal repeater identity. The optional room serves current rule state through a separate key.
+
+```mermaid
+flowchart LR
+    Radio["LoRa radio"] --> Router["Primary repeater identity and routing"]
+    USB["USB console"] --> Admin["Repeater CLI and ACL"]
+    Phone["Stock companion"] <-->|"MeshCore remote CLI"| Radio
+    Router <--> Admin
+    Admin <--> Rules["Persistent rule store"]
+    Router --> Notices["Private zero-hop neighbour notices"]
+    Router <-->|"Encrypted signed updates"| Peers["Trusted Hardened repeaters"]
+    Radio <--> Room["Optional secondary room identity"]
+    Room -->|"Read current rules"| Rules
+```
+
+```mermaid
+flowchart TD
+    In["Receive MeshCore frame"] --> Dispatch{"Frame addressed to a local service?"}
+    Dispatch -->|"Yes"| Access["Apply the matching service authentication and ACL"]
+    Dispatch -->|"Forwardable traffic"| Route["Apply path, region, flood, loop, and duplicate checks"]
+    Route --> Policy["Apply base and managed packet restrictions"]
+    Policy --> Identity{"Can the repeater verify the sender identity?"}
+    Identity -->|"Signed client or repeater advert"| Decision["Evaluate the full public key"]
+    Identity -->|"Legacy transit traffic"| Budget["Apply the applicable shared rate limit"]
+    Decision -->|"Allowed by the policy"| Queue["Queue RF forwarding under the existing airtime scheduler"]
+    Budget -->|"Budget available"| Queue
+    Route -->|"Rejected"| Drop["Release frame"]
+    Policy -->|"Filtered"| Drop
+    Decision -->|"Denied"| Drop
+    Budget -->|"Budget exhausted"| Drop
+```
+
+The diagram shows the checks that apply, as distinct packet paths run some checks in different orders. For example, the MeshCore advert handler verifies signed flood adverts before passing them to the identity check. Packets bound for a local service are handled separately from transit packets. Forwarding copies at other repeaters and direct reception by nearby radios remain possible even when this repeater drops a frame.
+
+| Traffic | What this repeater can use |
 | --- | --- |
-| `path.hash.mode` | `1` (2-byte paths) or `2` (3-byte paths). A saved `0` (1-byte) is changed to `1`; a saved `2` is left unchanged. |
-| `multi.acks` | Always `1`: one extra multi-ACK plus the normal ACK. |
-| `loop.detect` | `minimal`, `moderate`, or `strict`. A saved `off` is changed to `minimal`. |
-| `advert.interval` | Always `0`, disabling periodic zero-hop self-adverts. |
-| `flood.advert.interval` | `0` (disabled) or `47` to `168` hours. Saved values from `1` through `46` are changed to `47`. |
+| Signed MeshCore client or repeater advert | The full Ed25519 public key and a verified signature. |
+| Management addressed to this repeater | MeshCore's existing shared-secret transport and ACL role. A deny rule for the matched client also applies. |
+| Group text and group data crossing this repeater | Packet class, path, region, rate, and recognizable Public-channel traffic. A channel key is shared by its members. |
+| Anonymous requests and ordinary direct transit traffic | The existing routing and packet-level policies. The shared rate setting covers anonymous requests and the two group packet classes. |
+| Hardened policy updates | An authenticated encryption tag, an Ed25519 signature from a provisioned origin, and domain, scope, rule ID, and revision checks. |
 
-Allowed examples:
+`rules drops` reports aggregate counters `filter`, `identity`, and `rate` since boot. These counters cover the corresponding Hardened decisions and are useful alongside the stock `stats-packets` and `stats-radio` USB commands. Use matching RF path evidence when proving that a given repeater transmitted a particular packet.
 
-```text
-set path.hash.mode 1
-set path.hash.mode 2
-set multi.acks 1
-set loop.detect minimal
-set advert.interval 0
-set flood.advert.interval 0    # disable flood adverts
-set flood.advert.interval 47   # minimum enabled interval
-```
+## Base filters and enforced settings
 
-These restrictions apply only to repeater firmware. The corresponding `get` commands remain available.
+The base settings persist independently of the rule store in `/savemesh_prefs`. Upgrades can import older SaveMeshcore filter settings from `/prefs.json`. A saved `filter data off` survives reboot and upgrade.
 
-See the [repeater filter CLI reference](./docs/repeater_filter_cli.md) and the upstream [MeshCore CLI reference](./docs/cli_commands.md). For the filter settings and limits described here, use the repeater filter reference.
-
-| Command | Default | Behavior |
+| Filter | Fresh default | Effect when on |
 | --- | --- | --- |
-| `filter` | | Shows the state of all filters in one line, for example `> 1byte off, data on, public off`. |
-| `filter 1byte on` | Off | Stops forwarding 1-byte path-hash flood packets that have already traversed at least one hop. Zero-hop floods, direct packets, and floods using 2-byte or 3-byte path hashes are unaffected. |
-| `filter 1byte off` | | Disables the 1-byte flood filter. |
-| `filter 1byte` | | Shows whether the 1-byte flood filter is on or off. |
-| `filter data on` | On | Stops forwarding payload types `0x06` (`GRP_DATA`), `0x0C`–`0x0E` (reserved unsigned types), and `0x0F` (`RAW_CUSTOM`). |
-| `filter data off` | | Disables the data payload filter. |
-| `filter data` | | Shows whether the data payload filter is on or off. |
-| `filter public on` | Off | Stops forwarding group messages (`GRP_TXT` and `GRP_DATA`) on the default **Public** channel. |
-| `filter public off` | | Disables the Public channel filter. |
-| `filter public` | | Shows whether the Public channel filter is on or off. |
+| `1byte` | Off | Drops already-forwarded floods using 1-byte path hashes. A zero-hop flood, a direct packet, and wider flood paths can still pass the other checks. |
+| `data` | On | Drops group data `0x06`, reserved unsigned types `0x0C` through `0x0E`, and raw custom packets `0x0F` at the forwarding filter. |
+| `public` | Off | Drops group text and data that match the stock Public channel. It checks the Public channel hash byte and verifies the channel's 2-byte MAC. |
 
-### CLI examples
-
-Enable all filters:
-
-```text
-filter 1byte on
-filter data on
-filter public on
-```
-
-Disable all filters:
-
-```text
-filter 1byte off
-filter data off
-filter public off
-```
-
-Check all filters in one request, which is handy over LoRa:
+Run `filter` to see all three base settings or `filter <name>` to read one. Set any of them with `filter <name> on` or `filter <name> off`. For example:
 
 ```text
 filter
-> 1byte off, data on, public off
-```
-
-Check one filter at a time:
-
-```text
-filter 1byte
-filter data
+filter 1byte on
+filter data off
+filter public on
 filter public
 ```
 
-Example responses:
+The Public filter's MAC is calculated with the published Public-channel key. A different channel with the same hash byte normally passes the MAC check. The 16-bit tag permits a false match, about one in 65,536 candidate packets under the usual MAC assumption. The message body stays encrypted during this check.
+
+| Stock setting | Hardened value or allowed range |
+| --- | --- |
+| `path.hash.mode` | `1` for 2-byte or `2` for 3-byte path hashes. A saved `0` is repaired to `1`. |
+| `multi.acks` | `1`, one extra multi-ACK alongside the normal ACK. |
+| `loop.detect` | `minimal`, `moderate`, or `strict`. A saved `off` is repaired to `minimal`. |
+| `advert.interval` | `0`, disabling periodic zero-hop self-adverts. |
+| `flood.advert.interval` | `0` to disable or `47` to `168` hours. A saved `1` through `46` is raised to `47`. |
+
+Read these using `get <setting>` and change them using `set <setting> <value>`. The firmware checks them at boot before scheduling adverts and rejects out-of-policy CLI changes. [Base filter reference](docs/repeater_filter_cli.md)
+
+## Persistent rules and remote administration
+
+### Who can issue commands
+
+The physical USB console can administer the device. The primary repeater supports the existing MeshCore remote CLI and its stock ACL. Grant permissions using the companion's complete, 64-hex-character public key. The public key is the ID shown by the companion, separate from the human-readable device name. On the repeater, `get public.key` prints its own key.
 
 ```text
-OK - filter 1byte on
-OK - filter data off
-OK - filter public on
-> filter 1byte on
-> filter data off
-> filter public on
+get acl
+setperm <companion-public-key> 3
 ```
 
-### How the Public channel filter works
+After provisioning, select the **primary repeater contact** in your MeshCore companion app, use its remote management login, and send CLI commands there. The stock repeater login supports an empty password for a provisioned ACL key where the client permits it. Use `password <new-password>` over USB to replace an inherited administrator password. The stock CLI echoes the password in its reply, so keep that command out of shared logs. `get acl` is a USB diagnostic. `setperm <companion-public-key> 0` removes the role.
 
-Group packets name their channel with a single hash byte, and many channels share each value. The Public channel's byte is `0x11`. Blocking that byte alone would also drop other channels that happen to use `0x11`.
+| Existing ACL role | Hardened access over the primary repeater CLI |
+| --- | --- |
+| Guest `0` | Ordinary guest permissions apply. |
+| Read-only `1` | Rule inspection, counters, and sync status. |
+| Read-write `2` | Rule inspection, local rule changes, local mode and rate changes, and explicit sync requests. |
+| Admin `3` | The above plus shared rule writes, neighbour inspection, and room contact inspection or export. |
 
-Instead, the repeater checks each packet's 2-byte MAC against the published Public channel key. A matching MAC authenticates the packet as Public with the precision available in MeshCore's 16-bit channel tag. Among non-Public channels that also use hash byte `0x11`, the false-match probability is 1 in 65,536 per candidate packet. The repeater never decrypts the message, so it cannot read Public traffic. The Public key is not a secret: it is published in the MeshCore source and FAQ.
+Provision sync trust and keys, change notification keys, reset the neighbour table, and enable or rename the room from USB. The existing unauthenticated Ethernet console, where enabled, cannot use the Hardened rules, neighbour, or room commands. Notification channel members have ordinary channel membership. The channel provides no CLI entry point.
 
-The check runs only for group packets whose hash byte is `0x11`. Every other packet costs a single byte comparison.
+### Add, inspect, and remove rules
 
-> [!IMPORTANT]
-> The data filter is enabled by default only when no saved `filter data` setting exists. After `filter data off` is saved, firmware MeshCore Hardened updates preserve the off state.
+Replace bracketed or angle-bracketed placeholders with real values. Type a scope only when needed. The default scope is `local`.
 
-### Firmware upgrade compatibility
+| Command | Effect |
+| --- | --- |
+| `rules status` | Shows revision, active and deleted entry counts, capacity, mode, and rate. |
+| `rules count` | Returns the number of active rules. |
+| `rules list [cursor]` | Returns one active rule with `next=<cursor>`. Keep passing the returned cursor until `End`. |
+| `rules show <id-or-prefix>` | Shows a specific active rule. |
+| `rules add allow client <public-key> [scope]` | Allows an attributable companion identity. It can also enroll that identity for direct-neighbour notices. |
+| `rules add deny client <public-key> [scope]` | Blocks attributable activity for that companion. |
+| `rules add allow repeater <public-key> [scope]` | Allows signed repeater adverts under restricted policy. Sync trust is configured separately. |
+| `rules add deny repeater <public-key> [scope]` | Blocks the signed repeater identity and prevents acceptance of further sync updates it originated. |
+| `rules add filter <1byte\|data\|public> <on\|off> [scope]` | Adds a scoped filter decision. |
+| `rules delete <id-or-prefix>` | Removes the selected rule and retains its deletion record. Delete shared rules on their originating repeater. |
+| `rules mode <open\|restricted>` | Selects the identity policy for traffic that the repeater can attribute. |
+| `rules rate <0–600>` | Sets the shared limit per minute for forwarded group text, group data, and anonymous requests. Use `0` to disable this cap. |
+| `rules drops` | Shows the volatile filter, identity, and rate counters. |
 
-The filter settings are stored in their own file, `/savemesh_prefs`, separate from the official `/prefs.json`. Official MeshCore firmware never reads or rewrites that file. You can install clean official firmware without erasing the device: all radio, identity, and region settings carry over, and the filters simply stop being applied. If you later reinstall MeshCore Hardened, your saved filter choices, including `filter data off`, come back unchanged.
+For a controlled blacklist check:
 
-Older SaveMeshcore builds stored these settings in `/prefs.json`. On first boot, this build copies them into `/savemesh_prefs` automatically.
-
-## About MeshCore
-
-MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.
-
-## 🔍 What is MeshCore?
-
-MeshCore now supports a range of LoRa devices, allowing for easy flashing without the need to compile firmware manually. Users can flash a pre-built binary using tools like Adafruit ESPTool and interact with the network through a serial console.
-MeshCore provides the ability to create wireless mesh networks, similar to Meshtastic and Reticulum but with a focus on lightweight multi-hop packet routing for embedded projects. Unlike Meshtastic, which is tailored for casual LoRa communication, or Reticulum, which offers advanced networking, MeshCore balances simplicity with scalability, making it ideal for custom embedded solutions, where devices (nodes) can communicate over long distances by relaying messages through intermediate nodes. This is especially useful in off-grid, emergency, or tactical situations where traditional communication infrastructure is unavailable.
-
-## ⚡ Key Features
-
-* Multi-Hop Packet Routing
-  * Devices can forward messages across multiple nodes, extending range beyond a single radio's reach.
-  * Supports up to a configurable number of hops to balance network efficiency and prevent excessive traffic.
-  * Nodes use fixed roles where "Companion" nodes are not repeating messages at all to prevent adverse routing paths from being used.
-* Supports LoRa Radios – Works with Heltec, RAK Wireless, and other LoRa-based hardware.
-* Decentralized & Resilient – No central server or internet required; the network is self-healing.
-* Low Power Consumption – Ideal for battery-powered or solar-powered devices.
-* Simple to Deploy – Pre-built example applications make it easy to get started.
-
-## 🎯 What Can You Use MeshCore For?
-
-* Off-Grid Communication: Stay connected even in remote areas.
-* Emergency Response & Disaster Recovery: Set up instant networks where infrastructure is down.
-* Outdoor Activities: Hiking, camping, and adventure racing communication.
-* Tactical & Security Applications: Military, law enforcement, and private security use cases.
-* IoT & Sensor Networks: Collect data from remote sensors and relay it back to a central location.
-
-## 🚀 How to Get Started
-
-- Watch the [MeshCore QuickStart Playlist](https://www.youtube.com/watch?v=iaFltojJrAc&list=PLshzThxhw4O4WU_iZo3NmNZOv6KMrUuF9) by The Comms Channel
-- Watch the [MeshCore Technical Presentation](https://www.youtube.com/watch?v=OwmkVkZQTf4) by Liam Cottle.
-- Read through our [Frequently Asked Questions](./docs/faq.md) and [Documentation](https://docs.meshcore.io).
-- Flash the MeshCore firmware on a supported device.
-- Connect with a supported client.
-
-For developers:
-
-- Install [PlatformIO](https://docs.platformio.org) in [Visual Studio Code](https://code.visualstudio.com).
-- Clone and open the MeshCore repository in Visual Studio Code.
-- See the example applications you can modify and run:
-  - [Companion Radio](./examples/companion_radio) - For use with an external chat app, over BLE, USB or Wi-Fi.
-  - [KISS Modem](./examples/kiss_modem) - Serial KISS protocol bridge for host applications. ([protocol docs](./docs/kiss_modem_protocol.md))
-  - [Simple Repeater](./examples/simple_repeater) - Extends network coverage by relaying messages.
-  - [Simple Room Server](./examples/simple_room_server) - A simple BBS server for shared Posts.
-  - [Simple Secure Chat](./examples/simple_secure_chat) - Secure terminal based text communication between devices.
-  - [Simple Sensor](./examples/simple_sensor) - Remote sensor node with telemetry and alerting.
-
-The Simple Secure Chat example can be interacted with through the Serial Monitor in Visual Studio Code, or with a Serial USB Terminal on Android.
-
-## ⚡️ MeshCore Flasher
-
-We have prebuilt firmware ready to flash on supported devices.
-
-- Launch https://meshcore.io/flasher
-- Select a supported device
-- Flash one of the firmware types:
-  - Companion, Repeater or Room Server
-- Once flashing is complete, you can connect with one of the MeshCore clients below.
-
-## 📱 MeshCore Clients
-
-**Companion Firmware**
-
-The companion firmware can be connected to via BLE, USB or Wi-Fi depending on the firmware type you flashed.
-
-- Web: https://app.meshcore.nz
-- Android: https://play.google.com/store/apps/details?id=com.liamcottle.meshcore.android
-- iOS: https://apps.apple.com/us/app/meshcore/id6742354151?platform=iphone
-- NodeJS: https://github.com/liamcottle/meshcore.js
-- Python: https://github.com/fdlamotte/meshcore-cli
-
-**Repeater and Room Server Firmware**
-
-The repeater and room server firmware can be set up via USB in the web config tool.
-
-- https://config.meshcore.io
-
-They can also be managed via LoRa in the mobile app by using the Remote Management feature.
-
-## 🛠 Hardware Compatibility
-
-MeshCore is designed for devices listed in the [MeshCore Flasher](https://meshcore.io/flasher)
-
-## 📜 License
-
-MeshCore is open-source software released under the MIT License. You are free to use, modify, and distribute it for personal and commercial projects.
-
-## Contributing
-
-Please submit PR's using 'dev' as the base branch!
-For minor changes just submit your PR and we'll try to review it, but for anything more 'impactful' please open an Issue first and start a discussion. It is better to sound out what it is you want to achieve first, and try to come to a consensus on what the best approach is, especially when it impacts the structure or architecture of this codebase.
-
-Here are some general principles you should try to adhere to:
-* Keep it simple. Please, don't think like a high-level lang programmer. Think embedded, and keep code concise, without any unnecessary layers.
-* No dynamic memory allocation, except during setup/begin functions.
-* Use the same brace and indenting style that's in the core source modules. (A .clang-format is probably going to be added soon, but please do NOT retroactively re-format existing code. This just creates unnecessary diffs that make finding problems harder)
-
-Help us prioritize! Please react with thumbs-up to issues/PRs you care about most. We look at reaction counts when planning work.
-
-### Running unit tests
-
-To run unit tests, run the following command:
-
-```bash
-pio test --environment native --verbose
+```text
+rules status
+rules add deny client <client-public-key>
+rules list
+rules show <rule-id>
+rules drops
+rules delete <rule-id>
+rules list
 ```
 
-## Road-Map / To-Do
+Record the **32-hex-character rule ID** from `OK <id>`, then use that value in `show` or `delete`. Short prefixes require at least eight hex characters and must identify one record across both active rules and deletions. Repeating a delete on a known deletion is idempotent. Legacy messages can still cross the repeater while a client rule is active.
 
-There are a number of fairly major features in the pipeline, with no particular time-frames attached yet. In very rough chronological order:
-- [X] Companion radio: UI redesign
-- [X] Repeater + Room Server: add ACL's (like Sensor Node has)
-- [X] Standardise Bridge mode for repeaters
-- [ ] Repeater/Bridge: Standardise the Transport Codes for zoning/filtering
-- [X] Core + Repeater: enhanced zero-hop neighbour discovery
-- [ ] Core: round-trip manual path support
-- [ ] Companion + Apps: support for multiple sub-meshes (and 'off-grid' client repeat mode)
-- [ ] Core + Apps: support for LZW message compression
-- [ ] Core: dynamic CR (Coding Rate) for weak vs strong hops
-- [ ] Core: new framework for hosting multiple virtual nodes on one physical device
-- [ ] V2 protocol spec: discussion and consensus around V2 packet protocol, including path hashes, new encryption specs, etc
+A **deny** wins over **allow** for the same attributable subject. `open` is the default. It permits unknown identities that pass the other checks. `restricted` requires an explicit allow for signed client and repeater adverts. Existing non-guest ACL identities can still use management addressed to this repeater unless denied. An allow rule alone gives no CLI role.
 
-## 📞 Get Support
+For managed filters, priority is local, then regional, then global. At the same scope the numerically higher revision wins, with the origin key breaking ties. A managed `off` removes the restriction from the winning managed rule. The effective forwarding filter stays on if the independently persisted base filter is on. Use the base `filter` command to change that setting.
 
-- Report bugs and request features on the [GitHub Issues](https://github.com/meshcore-dev/meshcore/issues) page.
-- Find additional guides and components on [my site](https://buymeacoffee.com/ripplebiz).
-- Join [MeshCore Discord](https://meshcore.gg) to chat with the developers and get help from the community.
+For example, the following commands add a local managed restriction, enable restricted identity policy, and limit the shared forwarding classes to 30 packets per minute. To return to open mode with the added rate cap disabled, use `rules mode open` and `rules rate 0`. Remove the example filter using the ID returned by its add command.
+
+```text
+rules add filter public on local
+rules mode restricted
+rules rate 30
+rules status
+```
+
+### Flash storage and limits
+
+```mermaid
+sequenceDiagram
+    participant Op as USB or remote administrator
+    participant CLI as Repeater CLI
+    participant Store as Rule store
+    participant Slot as Alternate flash snapshot
+    Op->>CLI: Add or delete by exact ID
+    CLI->>Store: Check role, scope, capacity, and timestamp
+    Store->>Slot: Write signed record and snapshot digest
+    Slot-->>Store: Read back and verify contents
+    Store-->>CLI: Activate the committed snapshot
+    CLI-->>Op: Return OK and the ID for a new rule
+```
+
+Rules have a random 128-bit ID, a revision, a subject, a scope, an issuer, and a signature made by the originating repeater. The store alternates between `/hardened_rules_a` and `/hardened_rules_b`. It verifies the written copy before acknowledging a change and selects the newest valid snapshot at boot. The stored management timestamp for a remote writer also prevents replaying older successful mutations after reboot. There are eight remote-writer timestamp slots.
+
+The **24-entry** capacity includes active rules and deletion records. Deletion retains the existing slot so an old shared copy cannot resurrect the rule. When full, the firmware rejects new entries. Existing entries can still be deleted, with their slots retained. `rules status` shows the local store revision, which also advances for configuration changes and incoming shared updates. Confirm delivery by inspecting the receiving repeater.
+
+## Private direct-neighbour notices
+
+1. Generate a fresh private 16-byte key, for example with `openssl rand -hex 16`.
+2. Create a private channel on the companion with that same 32-hex-character key. Give the channel any recognizable label.
+3. From the repeater USB console, provision the key and, for a companion you wish to detect, enroll the companion's public key.
+
+```text
+neighbours channel <private-channel-key>
+rules add allow client <companion-public-key>
+neighbours status
+```
+
+4. From the companion, send one **zero-hop advert**. Use `neighbours show 0` to inspect the first observation, and increment the index for additional observations. The lookup returns the device class, full public key, and the repeater clock's last-seen timestamp.
+5. Read the group notice on the configured channel. It includes the observed device class and the first six bytes of the key. With a usable default transport region the notice uses that region. Otherwise it is sent zero-hop.
+
+The observation must come over RF, pass signed-advert processing, and have no recorded hops. Repeater adverts qualify under the current policy. Client adverts require an allow rule and are suppressed by a deny. The RAM table deduplicates up to 32 identities per observation epoch. A reboot, `neighbours reset`, or a channel-setting command starts a new epoch. The sender queues at most one notice every five minutes and waits for an empty radio outbound queue. `pending=0` describes the local queue. Check the companion's channel to confirm delivery.
+
+Use `neighbours status` for `channel`, `observed`, and `pending`. Use `neighbours channel off` to disable notices. Share the channel key only with intended recipients. A captured signed advert replayed nearby can still appear to have zero recorded hops. The observation records the received RF frame and its route metadata, which cannot establish geographic distance.
+
+## Share signed rules between repeaters
+
+Policy sync is opt-in. For repeaters A and B, read each primary public key with `get public.key`. Generate a dedicated 16-byte sync key and provision it on both devices over USB. Give both devices the same domain name.
+
+On A:
+
+```text
+rules domain lab
+rules sync.key <shared-sync-key>
+rules trust <repeater-B-public-key>
+rules sync status
+```
+
+On B:
+
+```text
+rules domain lab
+rules sync.key <shared-sync-key>
+rules trust <repeater-A-public-key>
+rules sync status
+```
+
+Domain and region names accept 1–15 lowercase letters, digits, underscores, or hyphens. There are eight peer key slots. Use the full key for `rules trust` and `rules untrust`. The shared symmetric key gives authorized members access to encrypted policy frames. Each receiving repeater also verifies the Ed25519 signature against the provisioned origin key. Changing the domain or region is blocked while that name is used by stored rules or deletion records.
+
+| Scope | Where the rule can travel |
+| --- | --- |
+| `local` | The originating repeater only. |
+| `global:lab` | Trusted Hardened repeaters in the configured domain that can receive the unscoped policy flood. Check that the stock wildcard region allows flood traffic for this scope. |
+| `region:labnorth` | Trusted Hardened repeaters with the same domain and configured policy region, reached over the matching stock region transport. |
+
+For a regional deployment, use the same matching region in each repeater's stock region map and allow floods in it. Example USB commands:
+
+```text
+region put labnorth
+region allowf labnorth
+region save
+rules region labnorth
+```
+
+On the originating repeater, issue a shared rule and retain its ID.
+
+```text
+rules add deny client <client-public-key> global:lab
+rules sync status
+rules sync
+```
+
+Shared writes queue sync automatically. The explicit `rules sync` command requeues the stored shared rules and deletions. Transmissions are limited to one queued update per minute and wait for the outbound queue. A region with no usable transport key is skipped. Check `rules list` or `rules show <id>` on the receiving device to confirm receipt. To remove a shared rule, delete its ID on the original repeater, then verify the peer no longer lists it.
+
+```mermaid
+sequenceDiagram
+    participant A as Origin repeater A
+    participant B as Trusted repeater B
+    A->>A: Commit rule or deletion and sign the record
+    A->>B: Flood one AES-128-GCM encrypted update
+    B->>B: Check region, decrypt, verify trusted origin and revision
+    B->>B: Commit newer state or ignore a duplicate
+    Note over A,B: After a partition, run rules sync on a repeater with current state
+    A->>B: Replay stored shared state including deletions
+```
+
+The policy record is signed with Ed25519 and bound to its origin, domain, and scope. The radio packet carries one record in a Hardened control frame, encrypted with AES-128-GCM using a 12-byte nonce and 12-byte authentication tag. A short origin prefix selects candidate keys. Only full signature verification authorizes the record. Peers reject stale updates to a known rule and retain signed deletion records to prevent resurrection. A repeater that already has an update does not re-flood it on receipt. For a multi-hop repair, run `rules sync` on intermediate trusted repeaters holding current state. Stock repeater interoperability for ordinary traffic is separate from participation in this sync protocol.
+
+`rules sync.key off` disables sync without deleting accepted rules. `rules untrust <peer-key>` blocks later updates from that signer. Previously accepted state remains until the applicable policy changes. An offline repeater can continue using its last accepted policy during a partition.
+
+## Optional administration room
+
+The room defaults off. Enable it only when you are ready to check the experimental room workflow. Android contact import, login, and reply display are still pending validation. The primary identity continues handling normal repeater forwarding and management.
+
+| Command | Effect |
+| --- | --- |
+| `get admin.enabled` | Reports whether an enabled secondary identity is available. |
+| `set admin.enabled on` | Creates a separate persistent keypair on first use and enables its service. USB only. |
+| `set admin.enabled off` | Stops the room service. USB only. |
+| `get admin.name` | Shows the custom name or the default based on the repeater name plus `Admin`. |
+| `set admin.name <short-name>` | Sets a valid MeshCore advert name of at most 31 bytes. USB only. |
+| `get admin.pubkey` | Prints the secondary identity's full public key. |
+| `get admin.advert` | Starts or reuses a five-minute signed contact export. Returns transfer ID, part count, byte count, and SHA-256. |
+| `get admin.advert <index>` | Returns a zero-based chunk of up to 48 bytes as hex. |
+| `admin.advert once` | Queues a single zero-hop room advert. The on-demand advert has a one-minute cooldown. |
+
+For setup, provision the desired companion's existing ACL role using the USB console. Then enable and name the room.
+
+```text
+setperm <companion-public-key> 1
+set admin.name Lab Admin
+set admin.enabled on
+get admin.pubkey
+get admin.advert
+```
+
+Retrieve parts from `0` through `parts - 1` within five minutes. Compare the transfer ID on all parts, append only their hex bodies in index order, decode the result, and check its byte count and SHA-256 against the original response. The upstream signed card convention is `meshcore://<combined-hex>`. If your client supports that format, try importing the card. For a local RF test, issue `admin.advert once` and receive it on the companion. The repeater sends no periodic room adverts.
+
+Open the **secondary room contact** and use native room login with an empty password and the previously enrolled ACL identity. Send one of these as room text:
+
+```text
+rules count
+rules status
+rules list
+rules list 1
+rules show <rule-id>
+```
+
+Use the cursor in the actual reply when paging. The adapter keeps up to eight in-memory room sessions with a five-minute idle lifetime and a shared two-second reply interval. It returns current rule data on demand. All changes go through the authenticated **primary repeater CLI** or USB. The room does not store posts, replies, or chat history, although a companion app may keep its own local copies.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| Nothing forwards | Check `get repeat`, the RF preset on both ends, region flood permissions, `filter`, and `stats-packets`. Use `set repeat on` only where you intend the repeater to forward. |
+| The blacklisted device is still audible | Check the packet class and actual path. Nearby recipients can hear a direct transmission, other repeaters may route it, and legacy transit text has no verifiable per-sender key. |
+| A remote rule command is rejected | Confirm the primary contact and ACL role over USB. Shared writes require the admin role. A writer's command timestamp must advance. |
+| An ID prefix is ambiguous | Use the complete 32-hex-character rule ID returned by the add command. |
+| Rule storage is full | Check `active`, `deleted`, and `capacity` in `rules status`. Deletions deliberately retain their slots. |
+| Rule storage is unavailable or a write fails | Retain the logs and use USB to inspect base operation. The firmware uses the last valid snapshot when available and avoids silently erasing corrupt policy files. |
+| No neighbour appears | Check the private channel is set, send a signed zero-hop advert over RF, enroll a client with an allow rule, check for a deny, and inspect `neighbours status`. |
+| Peer does not receive a rule | Check the sync key, domain, region flood configuration, origin trust, and rule scope. Start `rules sync` and allow time for queued updates. Inspect state on the receiving peer. |
+| Room does not answer | Verify the secondary contact, ACL membership, enabled setting, and session login. The normal USB and primary remote CLI remain the supported administration paths. |
+
+The Hardened rule store is limited to policy and configuration. The inherited stock packet metadata logger is separate. Use `log stop` to disable it after a diagnostic session. [Additional CLI reference](docs/hardened-repeater-cli.md)
+
+## Build and release
+
+GitHub Actions builds the same set of **97 repeater targets** published by SaveMeshcore v1.18.0-savemesh.1. A tag such as `repeater-v1.18.0-hardened` starts the full matrix. After all boards build and their artifact checksums are verified, the workflow assembles a draft release for review. The build creates no device uploads. [Release, artifact formats, and local commands](RELEASE.md) · [SaveMeshcore target reference](https://github.com/aigarslv/SaveMeshcore/releases/tag/repeater-v1.18.0-savemesh.1)
+
+```sh
+# List all supported release targets
+bash build.sh build-repeater-firmwares --list
+
+# Check every target locally and keep going after failures
+bash build.sh check-repeater-firmwares
+
+# Build a single development firmware package
+bash build.sh build-repeater-firmwares --version v1.18.0-hardened \
+  --target RAK_3401_repeater
+```
+
+The local checker writes one log per board and `summary.txt` under `out/repeater-check/`. The full matrix is configured in GitHub Actions. Review the Actions run for the actual result of each board.
+
+## Validation, provenance, and license
+
+The RAK3401 development build compiled, flashed, and answered its Hardened USB CLI. The RF bench detected the enrolled ThinkNode M5. Signed advert forwarding was observed before the deny, blocked while the deny was active, and observed again after deletion. The RAK3401 also forwarded private group text throughout the trial.
+
+The RF bench used the repeater USB console for administration after the T-Echo Lite Kit companion USB query failed. Stock Android room interoperability, remote administration in that bench, formal four-device RF validation, and multi-repeater policy convergence remain pending. The complete GitHub build matrix has yet to run. [Bench evidence and validation status](docs/implementation-plan.md)
+
+MeshCore Hardened started from a pinned SaveMeshcore snapshot, which adds filters to MeshCore. It has its own Git history and release workflow. The source archive revision and checksum are recorded in the provenance note. Software is distributed under the repository [MIT license](license.txt), with bundled components carrying their own notices. Binary releases also need the applicable notices for the bundled code and build dependencies. [Source baseline and upstream attribution](docs/source-baseline.md)

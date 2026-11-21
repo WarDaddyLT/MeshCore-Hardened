@@ -1,0 +1,146 @@
+name: MeshCore Hardened repeater release
+
+on:
+  push:
+    tags:
+      - 'repeater-v*-hardened*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing repeater release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repeater-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      commit: ${{ steps.source.outputs.commit }}
+      date: ${{ steps.source.outputs.date }}
+      targets: ${{ steps.source.outputs.targets }}
+    steps:
+      - name: Validate release tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^repeater-v[0-9]+\.[0-9]+\.[0-9]+-hardened(\.[1-9][0-9]*)?$ ]]; then
+            echo 'Expected repeater-vX.Y.Z-hardened or repeater-vX.Y.Z-hardened.N' >&2
+            exit 1
+          fi
+          {
+            echo "tag=$RELEASE_TAG"
+            echo "version=${RELEASE_TAG#repeater-}"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-environment
+      - name: Resolve commit and build matrix
+        id: source
+        run: |
+          set -o pipefail
+          commit=$(git rev-parse HEAD)
+          build_date=$(TZ=UTC git show -s --format=%cd --date=iso-strict-local HEAD | cut -c1-10)
+          targets=$(bash build.sh build-repeater-firmwares --list | jq -Rsc 'split("\n") | map(select(length > 0))')
+          test "$(jq length <<< "$targets")" -gt 0
+          {
+            echo "commit=$commit"
+            echo "date=$build_date"
+            echo "targets=$targets"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.prepare.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-environment
+      - name: Build and package repeater firmware
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          FIRMWARE_BUILD_DATE: ${{ needs.prepare.outputs.date }}
+        run: |
+          bash build.sh build-repeater-firmwares --version "$VERSION" \
+            --target "$TARGET" --output "$RUNNER_TEMP/repeater-firmware"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: repeater-${{ matrix.target }}
+          path: ${{ runner.temp }}/repeater-firmware/
+          if-no-files-found: error
+          overwrite: true
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: repeater-*
+          path: ${{ runner.temp }}/repeater-artifacts
+      - name: Verify and combine firmware
+        env:
+          TARGETS: ${{ needs.prepare.outputs.targets }}
+        run: |
+          python3 scripts/collect_repeater_release.py --targets "$TARGETS" \
+            --artifacts "$RUNNER_TEMP/repeater-artifacts" --output "$RUNNER_TEMP/repeater-release"
+      - name: Upload draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          # Verify the tag still points to the commit used by every build job.
+          object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object | [.type, .sha] | @tsv')
+          read -r type sha <<< "$object"
+          while [[ "$type" == tag ]]; do
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.object | [.type, .sha] | @tsv')
+            read -r type sha <<< "$object"
+          done
+          [[ "$type" == commit && "$sha" == "$SOURCE_COMMIT" ]]
+
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
+            if [[ "$draft" != true ]]; then
+              echo "Release $TAG has already been published." >&2
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --verify-tag --draft \
+              --title "MeshCore Hardened Repeater Firmware $VERSION" \
+              --notes "Repeater firmware built from $SOURCE_COMMIT. Use SHA256SUMS.txt to verify the firmware files."
+          fi
+
+          directory="$RUNNER_TEMP/repeater-release"
+          assets=()
+          for file in "$directory"/*; do
+            if [[ "${file##*/}" != SHA256SUMS.txt ]]; then
+              assets+=("$file")
+            fi
+          done
+          gh release upload "$TAG" --clobber "${assets[@]}"
+          gh release upload "$TAG" --clobber "$directory/SHA256SUMS.txt"

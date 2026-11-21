@@ -1,5 +1,7 @@
 #include "MyMesh.h"
 #include <algorithm>
+#include <AES.h>
+#include <GCM.h>
 
 /* ------------------------------ Config -------------------------------- */
 
@@ -59,6 +61,13 @@
 #define CLI_REPLY_DELAY_MILLIS      600
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
+static constexpr uint8_t PolicyType = 0xA1;
+static constexpr size_t PolicyNonceSize = 12;
+static constexpr size_t PolicyTagSize = 12;
+static constexpr size_t PolicyHeaderSize = 1 + PolicyNonceSize;
+static constexpr size_t PolicyDataSize = RuleStore::FingerprintSize + RuleStore::WireSize;
+static constexpr size_t PolicyPayloadSize = PolicyHeaderSize + PolicyDataSize + PolicyTagSize;
+static_assert(PolicyPayloadSize <= MAX_PACKET_PAYLOAD, "Policy update must fit one control packet");
 
 using savemesh::matchCommand;
 using savemesh::matchesValue;
@@ -459,19 +468,76 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
       return false;
     }
   }
-  if (savemesh::shouldDropOneByte(packet, _filter_prefs.filter_1byte)) {
-    MESH_DEBUG_PRINTLN("allowPacketForward: 1-byte path hash flood packet filtered");
+  if (shouldDropByFilter(packet)) {
+    ++_filter_drops;
     return false;
   }
-  if (savemesh::shouldDropData(packet, _filter_prefs.filter_data)) {
-    MESH_DEBUG_PRINTLN("allowPacketForward: data payload type filtered");
+  if (packet->isRouteDirect() && shouldDropAdvert(packet, false)) {
+    ++_identity_drops;
     return false;
   }
-  if (_filter_prefs.filter_public && isPublicChannelPacket(packet)) {
-    MESH_DEBUG_PRINTLN("allowPacketForward: Public channel packet filtered");
+  return !shouldDropByRate(packet, _radio_forward_budget);
+}
+
+bool MyMesh::shouldDropByFilter(const mesh::Packet* packet) const {
+  return savemesh::shouldDropOneByte(packet, _filter_prefs.filter_1byte || _rules.filterEnabled(RuleStore::OneByte))
+      || savemesh::shouldDropData(packet, _filter_prefs.filter_data || _rules.filterEnabled(RuleStore::Data))
+      || ((_filter_prefs.filter_public || _rules.filterEnabled(RuleStore::Public)) && isPublicChannelPacket(packet));
+}
+
+bool MyMesh::shouldDropByRate(const mesh::Packet* packet, ForwardBudget& budget) {
+  uint16_t limit = _rules.unknownRate();
+  if (!limit) return false;
+  uint8_t type = packet->getPayloadType();
+  if (type != PAYLOAD_TYPE_GRP_TXT && type != PAYLOAD_TYPE_GRP_DATA && type != PAYLOAD_TYPE_ANON_REQ) return false;
+  uint32_t now = millis();
+  if (now - budget.window_start >= 60000) {
+    budget.count = 0;
+    budget.window_start = now;
+  }
+  if (budget.count < limit) {
+    ++budget.count;
     return false;
   }
+  ++_rate_drops;
   return true;
+}
+
+bool MyMesh::shouldDropAdvert(const mesh::Packet* packet, bool signature_verified) const {
+  constexpr size_t SignedPrefixSize = PUB_KEY_SIZE + sizeof(uint32_t);
+  constexpr size_t AdvertPrefixSize = SignedPrefixSize + SIGNATURE_SIZE;
+  if (packet->getPayloadType() != PAYLOAD_TYPE_ADVERT) return false;
+  if (packet->payload_len < AdvertPrefixSize) return true;
+
+  size_t app_len = std::min<size_t>(packet->payload_len - AdvertPrefixSize, MAX_ADVERT_DATA_SIZE);
+  const uint8_t* app_data = packet->payload + AdvertPrefixSize;
+  AdvertDataParser parser(app_data, app_len);
+  if (!parser.isValid()) return false;
+
+  RuleStore::Subject subject;
+  if (parser.getType() == ADV_TYPE_REPEATER) subject = RuleStore::Repeater;
+  else if (parser.getType() == ADV_TYPE_CHAT) subject = RuleStore::Client;
+  else return false;
+
+  auto decision = _rules.decide(subject, packet->payload);
+  if (decision != RuleStore::Denied && (decision != RuleStore::Unknown || !_rules.restricted())) return false;
+  if (signature_verified) return true;
+
+  // Mesh dispatch verifies flood adverts before onAdvertRecv. Routed direct
+  // traffic and bridge exports can reach their forwarding gate earlier.
+  uint8_t message[SignedPrefixSize + MAX_ADVERT_DATA_SIZE];
+  memcpy(message, packet->payload, SignedPrefixSize);
+  memcpy(message + SignedPrefixSize, app_data, app_len);
+  mesh::Identity id(packet->payload);
+  return id.verify(packet->payload + SignedPrefixSize, message, SignedPrefixSize + app_len);
+}
+
+bool MyMesh::shouldDenyClient(const mesh::Identity& id) {
+  auto decision = _rules.decide(RuleStore::Client, id.pub_key);
+  if (decision == RuleStore::Denied) return true;
+  if (decision == RuleStore::Allowed || !_rules.restricted()) return false;
+  auto client = acl.getClient(id.pub_key, PUB_KEY_SIZE);
+  return !client || (client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST;
 }
 
 const char *MyMesh::getLogDateTime() {
@@ -494,7 +560,8 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #ifdef WITH_BRIDGE
-  if (_prefs.bridge_pkt_src == 1) {
+  if (_prefs.bridge_pkt_src == 1 && !shouldDropByFilter(pkt) && !shouldDropAdvert(pkt, false)
+      && !shouldDropByRate(pkt, _bridge_forward_budget)) {
     bridge.sendPacket(pkt);
   }
 #endif
@@ -520,7 +587,8 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #ifdef WITH_BRIDGE
-  if (_prefs.bridge_pkt_src == 0) {
+  if (_prefs.bridge_pkt_src == 0 && !shouldDropByFilter(pkt) && !shouldDropAdvert(pkt, false)
+      && !shouldDropByRate(pkt, _bridge_forward_budget)) {
     bridge.sendPacket(pkt);
   }
 #endif
@@ -581,11 +649,124 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
   } else {
     recv_pkt_region = NULL;
   }
+  if (pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL && pkt->payload_len == PolicyPayloadSize
+      && pkt->payload[0] == PolicyType) {
+    return receivePolicyUpdate(pkt);
+  }
+  if (receiveAdminRoom(pkt)) return ACTION_RELEASE;
   return Mesh::onRecvPacket(pkt);
+}
+
+mesh::DispatcherAction MyMesh::receivePolicyUpdate(mesh::Packet* packet) {
+  if (!packet->isRouteFlood() || !recv_pkt_region || !packet->received_over_radio
+      || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)
+      || getTables()->wasSeen(packet)) return ACTION_RELEASE;
+  if (_next_policy_commit && !millisHasNowPassed(_next_policy_commit)) return ACTION_RELEASE;
+
+  GCM<AES128> cipher;
+  if (!cipher.setKey(_rules.syncKey(), CIPHER_KEY_SIZE) || !cipher.setIV(packet->payload + 1, PolicyNonceSize)) {
+    return ACTION_RELEASE;
+  }
+  cipher.addAuthData(packet->payload, 1);
+  uint8_t data[PolicyDataSize];
+  cipher.decrypt(data, packet->payload + PolicyHeaderSize, sizeof(data));
+  if (!cipher.checkTag(packet->payload + PolicyHeaderSize + sizeof(data), PolicyTagSize)) return ACTION_RELEASE;
+  RuleStore::Rule rule{};
+  memcpy(&rule, data + RuleStore::FingerprintSize, RuleStore::WireSize);
+  if (rule.scope == RuleStore::Region && (recv_pkt_region->isWildcard()
+      || strcmp(recv_pkt_region->name, _rules.scopeName(RuleStore::Region)) != 0)) return ACTION_RELEASE;
+  auto result = _rules.mergeRule(rule, data, self_id);
+  if (result == RuleStore::Rejected) return ACTION_RELEASE;
+  getTables()->markSeen(packet);
+  if (result == RuleStore::Current) return ACTION_RELEASE;
+  _next_policy_commit = futureMillis(2000);
+  return routeRecvPacket(packet);
+}
+
+void MyMesh::sendPolicyUpdate() {
+  if (_sync_cursor >= RuleStore::Capacity || _mgr->getOutboundTotal() != 0
+      || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)
+      || (_next_policy_tx && !millisHasNowPassed(_next_policy_tx))) return;
+  for (; _sync_cursor < RuleStore::Capacity; ++_sync_cursor) {
+    const auto* rule = _rules.exportRule(_sync_cursor);
+    if (!rule || (!self_id.matches(rule->origin) && !_rules.trustedPeer(rule->origin))) continue;
+    TransportKey transport{};
+    if (rule->scope == RuleStore::Region) {
+      auto region = region_map.findByName(_rules.scopeName(RuleStore::Region));
+      if (!region || region_map.getTransportKeysFor(*region, &transport, 1) != 1 || transport.isNull()) continue;
+    }
+    uint8_t payload[PolicyPayloadSize];
+    payload[0] = PolicyType;
+    getRNG()->random(payload + 1, PolicyNonceSize);
+    GCM<AES128> cipher;
+    if (!cipher.setKey(_rules.syncKey(), CIPHER_KEY_SIZE) || !cipher.setIV(payload + 1, PolicyNonceSize)) return;
+    cipher.addAuthData(payload, 1);
+    uint8_t data[PolicyDataSize];
+    memcpy(data, rule->origin, RuleStore::FingerprintSize);
+    memcpy(data + RuleStore::FingerprintSize, rule, RuleStore::WireSize);
+    cipher.encrypt(payload + PolicyHeaderSize, data, sizeof(data));
+    cipher.computeTag(payload + PolicyHeaderSize + sizeof(data), PolicyTagSize);
+    auto packet = createControlData(payload, sizeof(payload));
+    if (!packet) return;
+    ++_sync_cursor;
+    _next_policy_tx = futureMillis(60 * 1000);
+    sendFloodScoped(transport, packet, 0, _prefs.path_hash_mode + 1);
+    return;
+  }
+}
+
+bool MyMesh::handleSyncCommand(const char* command, char* reply, bool usb, bool can_write) {
+  if (matchesValue(command, "sync status")) {
+    snprintf(reply, 150, "domain=%s region=%s key=%s sync=%s", _rules.scopeName(RuleStore::Global),
+             _rules.scopeName(RuleStore::Region),
+             mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE) ? "off" : "set",
+             _sync_cursor < RuleStore::Capacity ? "queued" : "idle");
+    return true;
+  }
+  if (matchesValue(command, "sync")) {
+    if (!can_write) strcpy(reply, "Err - write permission required");
+    else if (!_rules.scopeName(RuleStore::Global)[0] || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)) {
+      strcpy(reply, "Err - configure a policy domain and key");
+    }
+    else {
+      _sync_cursor = 0;
+      strcpy(reply, "OK - policy sync queued");
+    }
+    return true;
+  }
+  const char* arg;
+  if (matchCommand(command, "sync.key", &arg)) {
+    uint8_t key[CIPHER_KEY_SIZE]{};
+    bool ok = usb && (matchesValue(arg, "off")
+        || (savemesh::isHex(arg, 2 * sizeof(key)) && mesh::Utils::fromHex(key, sizeof(key), arg)
+            && !mesh::Utils::isZeroes(key, sizeof(key)))) && _rules.setSyncKey(key);
+    if (ok && mesh::Utils::isZeroes(key, sizeof(key))) _sync_cursor = RuleStore::Capacity;
+    strcpy(reply, ok ? "OK" : "Err - use USB with a private 16-byte sync key");
+    return true;
+  }
+  RuleStore::Scope scope;
+  if (matchCommand(command, "domain", &arg)) scope = RuleStore::Global;
+  else if (matchCommand(command, "region", &arg)) scope = RuleStore::Region;
+  else scope = RuleStore::Local;
+  if (scope != RuleStore::Local) {
+    bool ok = usb && _rules.setScope(scope, arg);
+    strcpy(reply, ok ? "OK" : "Err - use USB and an unused valid scope");
+    return true;
+  }
+  bool trust = matchCommand(command, "trust", &arg);
+  if (trust || matchCommand(command, "untrust", &arg)) {
+    uint8_t key[PUB_KEY_SIZE];
+    bool ok = usb && savemesh::isHex(arg, 2 * sizeof(key)) && mesh::Utils::fromHex(key, sizeof(key), arg)
+           && _rules.setTrustedPeer(key, trust, self_id);
+    strcpy(reply, ok ? "OK" : "Err - use USB and a valid peer key");
+    return true;
+  }
+  return false;
 }
 
 void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const mesh::Identity &sender,
                             uint8_t *data, size_t len) {
+  if (len <= sizeof(uint32_t) || shouldDenyClient(sender)) return;
   if (packet->getPayloadType() == PAYLOAD_TYPE_ANON_REQ) { // received an initial request by a possible admin
                                                            // client (unknown at this stage)
     uint32_t timestamp;
@@ -663,8 +844,118 @@ static bool isShare(const mesh::Packet *packet) {
   return false;
 }
 
+void MyMesh::noteDirectNeighbour(const mesh::Identity& id, bool repeater) {
+  const uint8_t empty[RuleStore::ChannelKeySize]{};
+  if (memcmp(_rules.neighbourChannel(), empty, sizeof(empty)) == 0) return;
+  uint32_t now = getRTCClock()->getCurrentTime();
+  for (size_t i = 0; i < _notice_count; i++) {
+    if (id.matches(_notices[i].key)) {
+      _notices[i].last_seen = now;
+      return;
+    }
+  }
+  if (_notice_count == NoticeCapacity) return;
+  auto& entry = _notices[_notice_count++];
+  memcpy(entry.key, id.pub_key, PUB_KEY_SIZE);
+  entry.last_seen = now;
+  entry.repeater = repeater;
+  entry.pending = true;
+}
+
+void MyMesh::sendNeighbourNotice() {
+  if (_next_notice && !millisHasNowPassed(_next_notice)) return;
+  if (_mgr->getOutboundTotal() != 0) return;
+  for (size_t i = 0; i < _notice_count; i++) {
+    auto& entry = _notices[i];
+    if (!entry.pending) continue;
+    mesh::GroupChannel channel{};
+    memcpy(channel.secret, _rules.neighbourChannel(), RuleStore::ChannelKeySize);
+    mesh::Utils::sha256(channel.hash, sizeof(channel.hash), channel.secret, RuleStore::ChannelKeySize);
+
+    uint8_t message[80];
+    uint32_t stamp = getRTCClock()->getCurrentTimeUnique();
+    memcpy(message, &stamp, sizeof(stamp));
+    message[4] = TXT_TYPE_PLAIN << 2;
+    char fingerprint[13];
+    mesh::Utils::toHex(fingerprint, entry.key, 6);
+    size_t length = snprintf(reinterpret_cast<char*>(message + 5), sizeof(message) - 5,
+                             "MeshCore Hardened: direct %s %s",
+                             entry.repeater ? "repeater" : "client", fingerprint);
+    auto packet = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, message, 5 + length);
+    if (!packet) return;
+    if (region_map.getDefaultRegion() && !default_scope.isNull()) {
+      sendFloodScoped(default_scope, packet, 0, _prefs.path_hash_mode + 1);
+    } else {
+      sendZeroHop(packet);
+    }
+    entry.pending = false;
+    _next_notice = futureMillis(5 * 60 * 1000UL);
+    return;
+  }
+}
+
+void MyMesh::handleNeighbourCommand(const char* command, char* reply, bool usb) {
+  const uint8_t empty[RuleStore::ChannelKeySize]{};
+  const char* arg;
+  if (matchesValue(command, "status")) {
+    bool enabled = memcmp(_rules.neighbourChannel(), empty, sizeof(empty)) != 0;
+    unsigned pending = 0;
+    for (size_t i = 0; i < _notice_count; i++) pending += _notices[i].pending;
+    snprintf(reply, 150, "channel=%s observed=%u pending=%u",
+             enabled ? "set" : "off", static_cast<unsigned>(_notice_count), pending);
+    return;
+  }
+  if (matchCommand(command, "show", &arg)) {
+    uint16_t index;
+    if (!parseUnsigned(arg, &index) || index >= _notice_count) {
+      strcpy(reply, "Err - no neighbour at that index");
+      return;
+    }
+    const auto& entry = _notices[index];
+    char key[PUB_KEY_SIZE * 2 + 1];
+    mesh::Utils::toHex(key, entry.key, PUB_KEY_SIZE);
+    snprintf(reply, 150, "%s %s last=%lu", entry.repeater ? "repeater" : "client",
+             key, static_cast<unsigned long>(entry.last_seen));
+    return;
+  }
+  if (!usb) {
+    strcpy(reply, "Err - use USB for neighbour settings");
+    return;
+  }
+  if (matchesValue(command, "reset")) {
+    _notice_count = 0;
+    strcpy(reply, "OK");
+    return;
+  }
+  if (!matchCommand(command, "channel", &arg)) {
+    strcpy(reply, "Err - use neighbours status/show/reset/channel");
+    return;
+  }
+  uint8_t key[RuleStore::ChannelKeySize]{};
+  if (!matchesValue(arg, "off")) {
+    const uint8_t public_key[] = {0x8b, 0x33, 0x87, 0xc9, 0xc5, 0xcd, 0xea, 0x6a,
+                                  0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72};
+    if (!savemesh::isHex(arg, 2 * sizeof(key)) || !mesh::Utils::fromHex(key, sizeof(key), arg)
+        || memcmp(key, empty, sizeof(key)) == 0 || memcmp(key, public_key, sizeof(key)) == 0) {
+      strcpy(reply, "Err - expected a 16-byte private channel key");
+      return;
+    }
+  }
+  if (!_rules.setNeighbourChannel(key)) {
+    strcpy(reply, "Err - channel storage write failed");
+    return;
+  }
+  _notice_count = 0;
+  strcpy(reply, "OK");
+}
+
 void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32_t timestamp,
                           const uint8_t *app_data, size_t app_data_len) {
+  if (shouldDropAdvert(packet, true)) {
+    ++_identity_drops;
+    packet->markDoNotRetransmit();
+    return;
+  }
   mesh::Mesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len); // chain to super impl
 
   // if this a zero hop advert (and not via 'Share'), add it to neighbours
@@ -672,6 +963,13 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
     AdvertDataParser parser(app_data, app_data_len);
     if (parser.isValid() && parser.getType() == ADV_TYPE_REPEATER) { // just keep neigbouring Repeaters
       putNeighbour(id, timestamp, packet->getSNR());
+    }
+    if (packet->received_over_radio && parser.isValid() && (!packet->isRouteFlood() || recv_pkt_region)) {
+      if (parser.getType() == ADV_TYPE_REPEATER) noteDirectNeighbour(id, true);
+      else if (parser.getType() == ADV_TYPE_CHAT
+               && _rules.decide(RuleStore::Client, id.pub_key) == RuleStore::Allowed) {
+        noteDirectNeighbour(id, false);
+      }
     }
   }
 }
@@ -684,6 +982,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     return;
   }
   ClientInfo* client = acl.getClientByIdx(i);
+  if (len <= sizeof(uint32_t) || shouldDenyClient(client->id)) return;
 
   if (type == PAYLOAD_TYPE_REQ) { // request (from a Known admin client!)
     uint32_t timestamp;
@@ -715,7 +1014,8 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     } else {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: possible replay attack detected");
     }
-  } else if (type == PAYLOAD_TYPE_TXT_MSG && len > 5 && client->isAdmin()) { // a CLI command
+  } else if (type == PAYLOAD_TYPE_TXT_MSG && len > 5
+             && (client->permissions & PERM_ACL_ROLE_MASK) != PERM_ACL_GUEST) {
     uint32_t sender_timestamp;
     memcpy(&sender_timestamp, data, 4); // timestamp (by sender's RTC clock - which could be wrong)
     uint8_t flags = (data[4] >> 2);        // message attempt number, and other flags
@@ -729,6 +1029,13 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
 
       // len can be > original length, but 'text' will be padded with zeroes
       data[len] = 0; // need to make a C string again, with null terminator
+      if (!client->isAdmin()) {
+        const char* command = reinterpret_cast<const char*>(&data[5]);
+        while (*command == ' ') ++command;
+        if (strlen(command) > 4 && command[2] == '|') command += 3;
+        const char* args;
+        if (!matchCommand(command, "rules", &args)) return;
+      }
 
       if (flags == TXT_TYPE_PLAIN) { // for legacy CLI, send Acks
         uint32_t ack_hash; // calc truncated hash of the message timestamp + text + sender pub_key, to prove
@@ -752,7 +1059,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       if (is_retry) {
         *reply = 0;
       } else {
-        handleCommand(sender_timestamp, command, reply);
+        handleCommand(sender_timestamp, command, reply, client);
       }
       int text_len = strlen(reply);
       if (text_len > 0) {
@@ -787,6 +1094,7 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
   if (i >= 0 && i < acl.getNumClients()) { // get from our known_clients table (sender SHOULD already be known in this context)
     MESH_DEBUG_PRINTLN("PATH to client, path_len=%d", (uint32_t)path_len);
     auto client = acl.getClientByIdx(i);
+    if (shouldDenyClient(client->id)) return false;
 
     // store a copy of path, for sendDirect()
     client->out_path_len = mesh::Packet::copyPath(client->out_path, path, path_len);
@@ -966,6 +1274,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
   repairRepeaterPrefs();
   _filter_prefs.begin(_fs);
   acl.load(_fs, self_id);
+  _rules.begin(_fs, self_id);
+  _room_identity_loaded = _rules.loadRoomIdentity(_room_identity)
+                       && _room_identity.pub_key[0] != self_id.pub_key[0];
   // TODO: key_store.begin();
   region_map.load(_fs);
 
@@ -1297,8 +1608,9 @@ void MyMesh::handleFilterCommand(const char* name, const char* arg, uint8_t& set
   }
 }
 
-void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply) {
-  if (region_load_active) {
+void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply,
+                           const ClientInfo* client, bool ethernet) {
+  if (region_load_active && (!client || client->isAdmin())) {
     if (StrHelper::isBlank(command)) {  // empty/blank line, signal to terminate 'load' operation
       region_map = temp_map;  // copy over the temp instance as new current map
       region_load_active = false;
@@ -1338,6 +1650,36 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     memcpy(reply, command, 3);                    // reflect the prefix back
     reply += 3;
     command += 3;
+  }
+
+  const char* args;
+  if (!ethernet && (!client || client->isAdmin()) && handleAdminRoomCommand(command, reply, !client)) return;
+  if (!ethernet && (!client || client->isAdmin()) && matchCommand(command, "neighbours", &args)) {
+    handleNeighbourCommand(args, reply, !client);
+    return;
+  }
+  if (matchCommand(command, "rules", &args)) {
+    if (ethernet) {
+      strcpy(reply, "Err - use USB or authenticated mesh CLI");
+      return;
+    }
+    if (matchesValue(args, "drops")) {
+      snprintf(reply, 150, "filter=%lu identity=%lu rate=%lu",
+               static_cast<unsigned long>(_filter_drops), static_cast<unsigned long>(_identity_drops),
+               static_cast<unsigned long>(_rate_drops));
+      return;
+    }
+    bool can_write = !client || (client->permissions & PERM_ACL_ROLE_MASK) >= PERM_ACL_READ_WRITE;
+    if (handleSyncCommand(args, reply, !client, can_write)) return;
+    bool sync_requested = false;
+    _rules.handleCommand(args, reply, self_id, client ? &client->id : nullptr,
+                         sender_timestamp, *getRNG(), can_write, !client || client->isAdmin(), sync_requested);
+    if (sync_requested) _sync_cursor = 0;
+    return;
+  }
+  if (client && !client->isAdmin()) {
+    strcpy(reply, "Err - admin permission required");
+    return;
   }
 
   if (handleProtectedPrefsCommand(sender_timestamp, command, reply)) return;
@@ -1407,6 +1749,8 @@ void MyMesh::loop() {
 #endif
 
   mesh::Mesh::loop();
+  sendNeighbourNotice();
+  sendPolicyUpdate();
 
   if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
     mesh::Packet *pkt = createSelfAdvert();

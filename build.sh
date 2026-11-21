@@ -2,6 +2,8 @@
 
 # exit when any command fails
 set -e
+set -o pipefail
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 global_usage() {
   cat - <<EOF
@@ -15,7 +17,9 @@ Commands:
   build-firmwares: Build all firmwares for all targets.
   build-matching-firmwares <build-match-spec>: Build all firmwares for build targets containing the string given for <build-match-spec>.
   build-companion-firmwares: Build all companion firmwares for all build targets.
-  build-repeater-firmwares: Build all repeater firmwares for all build targets.
+  build-repeater-firmwares --version <version> [--target <target>]: Package SaveMeshcore's repeater targets.
+  check-repeater-firmwares [--target <target>]: Compile repeater targets and report every result.
+  get-repeater-firmwares-to-build: List the repeater targets without building.
   build-room-server-firmwares: Build all chat room server firmwares for all build targets.
 
 Examples:
@@ -29,7 +33,7 @@ Build all companion firmwares
 $ sh build.sh build-companion-firmwares
 
 Build all repeater firmwares
-$ sh build.sh build-repeater-firmwares
+$ bash build.sh build-repeater-firmwares --version v1.18.0-hardened
 
 Build all chat room server firmwares
 $ sh build.sh build-room-server-firmwares
@@ -55,23 +59,34 @@ EOF
 
 # get a list of pio env names that start with "env:"
 get_pio_envs() {
-  pio project config | grep 'env:' | sed 's/env://'
+  printf '%s' "$PIO_CONFIG_JSON" | python3 -c '
+import json
+import sys
+for section, _ in json.load(sys.stdin):
+    if section.startswith("env:"):
+        print(section[4:])
+'
 }
 
 # Catch cries for help before doing anything else.
-case $1 in
+case ${1:-} in
   help|usage|-h|--help)
     global_usage
-    exit 1
-    ;;
-  list|-l)
-    get_pio_envs
     exit 0
+    ;;
+  build-repeater-firmwares)
+    shift
+    exec python3 "$SCRIPT_DIR/scripts/build_repeaters.py" "$@"
+    ;;
+  check-repeater-firmwares)
+    shift
+    exec python3 "$SCRIPT_DIR/scripts/build_repeaters.py" --check "$@"
     ;;
 esac
 
 # cache project config json for use in get_platform_for_env()
 PIO_CONFIG_JSON=$(pio project config --json-output)
+FIRMWARE_OUTPUT_DIR=${FIRMWARE_OUTPUT_DIR:-out}
 
 # $1 should be the string to find (case insensitive)
 get_pio_envs_containing_string() {
@@ -98,20 +113,22 @@ get_pio_envs_ending_with_string() {
 # get platform flag for a given environment
 # $1 should be the environment name
 get_platform_for_env() {
-  local env_name=$1
-  printf '%s' "$PIO_CONFIG_JSON" | python3 -c "
+  printf '%s' "$PIO_CONFIG_JSON" | python3 -c '
 import sys, json, re
 data = json.load(sys.stdin)
 for section, options in data:
-    if section == 'env:$env_name':
-        for key, value in options:
-            if key == 'build_flags':
-                for flag in value:
-                    match = re.search(r'(ESP32_PLATFORM|NRF52_PLATFORM|STM32_PLATFORM|RP2040_PLATFORM)', flag)
-                    if match:
-                        print(match.group(1))
-                        sys.exit(0)
-"
+    if section == "env:" + sys.argv[1]:
+        options = dict(options)
+        for flag in options.get("build_flags", []):
+            match = re.search(r"(ESP32_PLATFORM|NRF52_PLATFORM|STM32_PLATFORM|RP2040_PLATFORM)", flag)
+            if match:
+                platform = match.group(1)
+                if platform == "NRF52_PLATFORM" and options.get("upload_protocol") == "jlink":
+                    platform = "NRF52_UF2_ONLY"
+                print(platform)
+                sys.exit(0)
+sys.exit(f"Unsupported or unknown PlatformIO environment: {sys.argv[1]}")
+' "$1"
 }
 
 # disable all debug logging flags if DISABLE_DEBUG=1 is set
@@ -122,15 +139,15 @@ disable_debug_flags() {
 }
 
 # build firmware for the provided pio env in $1
-build_firmware() {
-  # get env platform for post build actions
-  ENV_PLATFORM=($(get_platform_for_env $1))
+build_firmware() (
+  ENV_PLATFORM=$(get_platform_for_env "$1")
+  build_dir="${PLATFORMIO_BUILD_DIR:-.pio/build}/$1"
 
   # get git commit sha
-  COMMIT_HASH=$(git rev-parse --short HEAD)
+  COMMIT_HASH=${FIRMWARE_BUILD_REVISION:-$(git rev-parse --short HEAD)}
 
   # set firmware build date
-  FIRMWARE_BUILD_DATE=$(date '+%d-%b-%Y')
+  FIRMWARE_BUILD_DATE=${FIRMWARE_BUILD_DATE:-$(date '+%d-%b-%Y')}
 
   # get FIRMWARE_VERSION, which should be provided by the environment
   if [ -z "$FIRMWARE_VERSION" ]; then
@@ -153,35 +170,45 @@ build_firmware() {
   disable_debug_flags
 
   # build firmware target
-  pio run -e $1
+  pio run -e "$1"
+
+  artifact() {
+    if [[ ! -s "$build_dir/firmware$1" ]]; then
+      printf 'Missing firmware artifact: %s\n' "$build_dir/firmware$1" >&2
+      return 1
+    fi
+    cp "$build_dir/firmware$1" "$FIRMWARE_OUTPUT_DIR/$FIRMWARE_FILENAME$1"
+  }
 
   # build merge-bin for esp32 fresh install, copy .bins to out folder (e.g: Heltec_v3_room_server-v1.0.0-SHA.bin)
   if [ "$ENV_PLATFORM" == "ESP32_PLATFORM" ]; then
-    pio run -t mergebin -e $1
-    cp .pio/build/$1/firmware.bin out/${FIRMWARE_FILENAME}.bin 2>/dev/null || true
-    cp .pio/build/$1/firmware-merged.bin out/${FIRMWARE_FILENAME}-merged.bin 2>/dev/null || true
+    pio run -t mergebin -e "$1"
+    artifact .bin
+    artifact -merged.bin
   fi
 
   # build .uf2 for nrf52 boards, copy .uf2 and .zip to out folder (e.g: RAK_4631_Repeater-v1.0.0-SHA.uf2)
-  if [ "$ENV_PLATFORM" == "NRF52_PLATFORM" ]; then
-    python3 bin/uf2conv/uf2conv.py .pio/build/$1/firmware.hex -c -o .pio/build/$1/firmware.uf2 -f 0xADA52840
-    cp .pio/build/$1/firmware.uf2 out/${FIRMWARE_FILENAME}.uf2 2>/dev/null || true
-    cp .pio/build/$1/firmware.zip out/${FIRMWARE_FILENAME}.zip 2>/dev/null || true
+  if [[ "$ENV_PLATFORM" == "NRF52_PLATFORM" || "$ENV_PLATFORM" == "NRF52_UF2_ONLY" ]]; then
+    python3 bin/uf2conv/uf2conv.py "$build_dir/firmware.hex" -c -o "$build_dir/firmware.uf2" -f 0xADA52840
+    artifact .uf2
+    if [[ "$ENV_PLATFORM" == "NRF52_PLATFORM" ]]; then
+      artifact .zip
+    fi
   fi
 
   # for stm32, copy .bin and .hex to out folder
   if [ "$ENV_PLATFORM" == "STM32_PLATFORM" ]; then
-    cp .pio/build/$1/firmware.bin out/${FIRMWARE_FILENAME}.bin 2>/dev/null || true
-    cp .pio/build/$1/firmware.hex out/${FIRMWARE_FILENAME}.hex 2>/dev/null || true
+    artifact .bin
+    artifact .hex
   fi
 
   # for rp2040, copy .bin and .uf2 to out folder
   if [ "$ENV_PLATFORM" == "RP2040_PLATFORM" ]; then
-    cp .pio/build/$1/firmware.bin out/${FIRMWARE_FILENAME}.bin 2>/dev/null || true
-    cp .pio/build/$1/firmware.uf2 out/${FIRMWARE_FILENAME}.uf2 2>/dev/null || true
+    artifact .bin
+    artifact .uf2
   fi
 
-}
+)
 
 # firmwares containing $1 will be built
 build_all_firmwares_matching() {
@@ -262,16 +289,35 @@ build_firmwares() {
   build_room_server_firmwares
 }
 
-# clean build dir
-rm -rf out
-mkdir -p out
+# Listing targets must not create or modify firmware artifacts.
+case ${1:-} in
+  list|-l)
+    get_pio_envs
+    exit 0
+    ;;
+  get-companion-firmwares-to-build)
+    get_pio_envs_ending_with_string "_companion_radio_usb"
+    get_pio_envs_ending_with_string "_companion_radio_ble"
+    exit 0
+    ;;
+  get-repeater-firmwares-to-build)
+    get_pio_envs_ending_with_string "_repeater"
+    exit 0
+    ;;
+  get-room-server-firmwares-to-build)
+    get_pio_envs_ending_with_string "_room_server"
+    exit 0
+    ;;
+esac
+
+mkdir -p "$FIRMWARE_OUTPUT_DIR"
 
 # handle script args
 if [[ $1 == "build-firmware" ]]; then
-  TARGETS=${@:2}
-  if [ "$TARGETS" ]; then
-    for env in $TARGETS; do
-      build_firmware $env
+  shift
+  if [ "$#" -gt 0 ]; then
+    for env in "$@"; do
+      build_firmware "$env"
     done
   else
     echo "usage: $0 build-firmware <target>"
@@ -288,17 +334,8 @@ elif [[ $1 == "build-firmwares" ]]; then
   build_firmwares
 elif [[ $1 == "build-companion-firmwares" ]]; then
   build_companion_firmwares
-elif [[ $1 == "build-repeater-firmwares" ]]; then
-  build_repeater_firmwares
 elif [[ $1 == "build-room-server-firmwares" ]]; then
   build_room_server_firmwares
 elif [[ $1 == "build-kiss-radio-firmwares" ]]; then
   build_kiss_modem_firmwares
-elif [[ $1 == "get-companion-firmwares-to-build" ]]; then
-  get_pio_envs_ending_with_string "_companion_radio_usb"
-  get_pio_envs_ending_with_string "_companion_radio_ble"
-elif [[ $1 == "get-repeater-firmwares-to-build" ]]; then
-  get_pio_envs_ending_with_string "_repeater"
-elif [[ $1 == "get-room-server-firmwares-to-build" ]]; then
-  get_pio_envs_ending_with_string "_room_server"
 fi

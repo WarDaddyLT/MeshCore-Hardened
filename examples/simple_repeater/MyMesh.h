@@ -37,6 +37,7 @@
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
 #include "FilterPrefs.h"
+#include "RuleStore.h"
 #include "ChannelMatch.h"
 #include "ForwardFilter.h"
 #include "RepeaterPrefsPolicy.h"
@@ -91,6 +92,46 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool _logging;
   NodePrefs _prefs;
   FilterPrefs _filter_prefs;
+  RuleStore _rules;
+  uint32_t _filter_drops = 0;
+  uint32_t _identity_drops = 0;
+  uint32_t _rate_drops = 0;
+  struct ForwardBudget {
+    uint32_t window_start = 0;
+    uint16_t count = 0;
+  };
+  ForwardBudget _radio_forward_budget;
+#ifdef WITH_BRIDGE
+  ForwardBudget _bridge_forward_budget;
+#endif
+  static constexpr size_t NoticeCapacity = 32;
+  struct Notice {
+    uint8_t key[PUB_KEY_SIZE];
+    uint32_t last_seen;
+    bool repeater;
+    bool pending;
+  };
+  Notice _notices[NoticeCapacity]{};
+  size_t _notice_count = 0;
+  unsigned long _next_notice = 0;
+  size_t _sync_cursor = RuleStore::Capacity;
+  unsigned long _next_policy_tx = 0;
+  unsigned long _next_policy_commit = 0;
+  mesh::LocalIdentity _room_identity;
+  bool _room_identity_loaded = false;
+  struct RoomSession {
+    uint8_t key[PUB_KEY_SIZE];
+    uint8_t path[MAX_PATH_SIZE];
+    uint8_t path_len;
+    uint32_t last_stamp;
+    unsigned long expires;
+  };
+  RoomSession _room_sessions[8]{};
+  unsigned long _next_room_reply = 0;
+  unsigned long _next_room_advert = 0;
+  uint8_t _admin_advert[MAX_TRANS_UNIT]{};
+  uint8_t _admin_advert_length = 0;
+  unsigned long _admin_advert_expires = 0;
   ClientACL  acl;
   CommonCLI _cli;
   uint8_t reply_data[MAX_PACKET_PAYLOAD];
@@ -124,6 +165,23 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
   bool repairRepeaterPrefs();
+  bool shouldDropByFilter(const mesh::Packet* packet) const;
+  bool shouldDropByRate(const mesh::Packet* packet, ForwardBudget& budget);
+  bool shouldDropAdvert(const mesh::Packet* packet, bool signature_verified) const;
+  bool shouldDenyClient(const mesh::Identity& id);
+  void noteDirectNeighbour(const mesh::Identity& id, bool repeater);
+  void sendNeighbourNotice();
+  void handleNeighbourCommand(const char* command, char* reply, bool usb);
+  bool handleSyncCommand(const char* command, char* reply, bool usb, bool can_write);
+  void sendPolicyUpdate();
+  mesh::DispatcherAction receivePolicyUpdate(mesh::Packet* packet);
+  bool receiveAdminRoom(mesh::Packet* packet);
+  bool handleAdminRoomCommand(const char* command, char* reply, bool usb);
+  bool prepareAdminRoomIdentity();
+  const char* adminRoomName(char* buffer) const;
+  mesh::Packet* createAdminRoomAdvert();
+  void sendAdminRoomPacket(mesh::Packet* request, mesh::Packet* response,
+                           const RoomSession& session, unsigned long delay);
   bool handleProtectedPrefsCommand(uint32_t sender_timestamp, char* command, char* reply);
   void handleFilterCommand(const char* name, const char* arg, uint8_t& setting, char* reply);
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
@@ -235,7 +293,8 @@ public:
   void saveIdentity(const mesh::LocalIdentity& new_id) override;
   void clearStats() override;
 
-  void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
+  void handleCommand(uint32_t sender_timestamp, char* command, char* reply,
+                     const ClientInfo* client = nullptr, bool ethernet = false);
   void loop();
 
 #if defined(WITH_BRIDGE)

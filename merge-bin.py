@@ -25,7 +25,7 @@ def merge_bin_action(source, target, env):
             board_config.get("build.mcu", "esp32"),
             "merge_bin",
             "-o",
-            merged_bin,
+            '"' + merged_bin + '"',
             "--flash_mode",
             board_config.get("build.flash_mode", "dio"),
             "--flash_freq",
@@ -35,7 +35,7 @@ def merge_bin_action(source, target, env):
             *flash_images,
         ]
     )
-    env.Execute(merge_cmd)
+    return env.Execute(merge_cmd)
 
 
 env.AddCustomTarget(

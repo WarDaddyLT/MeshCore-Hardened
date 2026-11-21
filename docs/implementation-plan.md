@@ -5,10 +5,21 @@ Build and flash development firmware as each feature lands. Formal native and fo
 | Phase | Status | Scope |
 | --- | --- | --- |
 | Source baseline | VERIFIED | Pinned [SaveMeshcore snapshot](source-baseline.md) in the independent MeshCore Hardened repository. |
-| First development build | VERIFIED | `pio run -e RAK_3401_repeater` produced `.pio/build/RAK_3401_repeater/firmware.zip` for the WisCore RAK3401. Flash usage was 413,232 bytes and static RAM usage was 35,652 bytes. |
-| Rule store and CLI | TODO | Add persistent allow, deny and filter rules with stable IDs, pagination and exact-ID deletion through the existing repeater CLI. |
-| Packet policy | TODO | Apply rules at forwarding gates using verified identities and preserve stock traffic policy for unattributable traffic. |
-| Direct-neighbour notifications | TODO | Notify authorized operators about authenticated direct observations. |
-| Policy synchronization | TODO | Distribute signed revisions and deletion records to authorized peers. |
-| Optional room identity | TODO | Add the secondary identity and verify stock Android behavior before enabling room-based administration. |
-| Formal validation and release | TODO | Run native and four-device hardware suites, measure resource use and prepare release artifacts. |
+| RAK3401 development build | VERIFIED | `pio run -e RAK_3401_repeater` produced `.pio/build/RAK_3401_repeater/firmware.zip` with all firmware features below. Flash usage is 439,968 bytes (54.0%) and static RAM usage is 48,716 bytes (20.7%). |
+| Rule store and CLI | VERIFIED (build) | Persistent allow, deny and filter rules, stable IDs, pagination, durable deletion records and existing repeater CLI role checks. |
+| Packet policy | VERIFIED (build) | Verified-identity enforcement, existing packet filters, open and restricted modes, a shared forwarding budget for unattributed group and anonymous traffic, and aggregate drop counters. |
+| Direct-neighbour notifications | VERIFIED (build) | Private-channel notices for verified zero-hop observations, with a bounded deduplication table and send interval. |
+| Policy synchronization | VERIFIED (build) | Signed, encrypted global and regional updates between provisioned repeaters, including deletion records and explicit reconciliation. |
+| Optional room identity | VERIFIED (build) | Separate persistent room identity, signed contact export, and a read-only room adapter. It defaults off pending stock Android validation. |
+| RAK3401 development flash | VERIFIED | USB DFU completed. The repeater returned in application mode and responded to `rules status` with revision 0, open mode, and capacity for 24 records. |
+| Formal validation and release | TODO | Validate native behavior, the four-device RF matrix, and stock Android interoperability in the formal validation phase. |
+
+The firmware CLI and the development limits are documented in the [repeater CLI guide](hardened-repeater-cli.md).
+
+### Blacklist RF bench
+
+The RAK3401 detected the enrolled ThinkNode M5 from a signed zero-hop advert. The M5 ran the official MeshCore USB companion v1.18.0 build. Captures matched the RAK3401's hop hash for the M5's signed flood advert before adding a deny rule and after deleting it. With the deny rule active, the RAK3401 recorded one identity drop and zero flood transmissions for the advert trial.
+
+The RAK3401 forwarded private group text before, during, and after the deny. The captures matched the temporary channel and the RAK3401's hop hash. Legacy group text carries no cryptographically verifiable sender identity for a transit repeater.
+
+The T-Echo Lite Kit accepted official firmware updates over DFU but did not answer companion queries over USB. The RAK3401's USB console applied and removed the test rules, so the T-Echo remote admin flow remains pending. Cleanup restored the repeater's previous forwarding and notification settings, cleared the temporary M5 channel, and left no active test rules. The two test deletion records remain in the rule store.
