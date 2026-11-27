@@ -1,0 +1,8 @@
+{
+  "roles": {
+    "R1": {"serial_number": "RAK_1W_USB_SERIAL", "public_key": ""},
+    "R2": {"location": "THINKNODE_M5_USB_LOCATION", "vid_pid": "1a86:7522", "public_key": ""},
+    "ADMIN": {"serial_number": "WIO_TRACKER_EINK_USB_SERIAL", "public_key": ""},
+    "ACTOR": {"serial_number": "T_ECHO_LITE_KIT_USB_SERIAL", "public_key": ""}
+  }
+}
