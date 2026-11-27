@@ -465,6 +465,38 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   return !shouldDropByRate(packet, _radio_forward_budget);
 }
 
+bool MyMesh::admitForwardedPacket(const mesh::Packet* packet) {
+  const int length = packet->getRawLength();
+  if (length > MAX_TRANS_UNIT) return false;
+
+  const auto category = forward_traffic::categoryFor(packet->getPayloadType());
+  auto& stats = _forwarding_stats[category];
+  unsigned queued = 0;
+  const int queueSize = _mgr->getOutboundTotal();
+  for (int index = 0; index < queueSize; ++index) {
+    const auto* pending = _mgr->getOutboundByIdx(index);
+    if (forward_traffic::categoryFor(pending->getPayloadType()) == category) ++queued;
+  }
+  if (_mgr->getFreeCount() < forward_traffic::ReservedFreePackets
+      || queued >= forward_traffic::MaxQueuedPerCategory) {
+    ++stats.queueDrops;
+    return false;
+  }
+
+  const uint32_t airtime = _radio->getEstAirtimeFor(length);
+  const auto share = _rules.airtimeShare();
+  if (share) {
+    const auto refill = static_cast<unsigned>(10.0f * share / (1.0f + getAirtimeBudgetFactor()));
+    const auto maxFrameAirtime = _radio->getEstAirtimeFor(MAX_TRANS_UNIT);
+    if (!_forwarding_airtime[category].admit(millis(), airtime, maxFrameAirtime, refill)) {
+      ++stats.airtimeDrops;
+      return false;
+    }
+  }
+  stats.admittedAirtimeMs += airtime;
+  return true;
+}
+
 bool MyMesh::shouldDropByFilter(const mesh::Packet* packet) const {
   return _rules.trafficPolicy().drops(packet->getPayloadType())
       || savemesh::shouldDropOneByte(packet, _filter_prefs.filter_1byte || _rules.filterEnabled(RuleStore::OneByte))
@@ -1660,10 +1692,30 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       else _rules.handleRecoveryCommand(args, reply);
       return;
     }
-    if (matchesValue(args, "drops")) {
-      snprintf(reply, 150, "filter=%lu identity=%lu rate=%lu",
-               static_cast<unsigned long>(_filter_drops), static_cast<unsigned long>(_identity_drops),
-               static_cast<unsigned long>(_rate_drops));
+    const char* category;
+    if (matchCommand(args, "drops", &category)) {
+      if (!*category) {
+        uint32_t airtimeDrops = 0;
+        uint32_t queueDrops = 0;
+        for (const auto& stats : _forwarding_stats) {
+          airtimeDrops += stats.airtimeDrops;
+          queueDrops += stats.queueDrops;
+        }
+        snprintf(reply, 150, "filter=%lu identity=%lu rate=%lu airtime=%lu queue=%lu",
+                 static_cast<unsigned long>(_filter_drops), static_cast<unsigned long>(_identity_drops),
+                 static_cast<unsigned long>(_rate_drops), static_cast<unsigned long>(airtimeDrops),
+                 static_cast<unsigned long>(queueDrops));
+        return;
+      }
+      for (unsigned index = 0; index < forward_traffic::CategoryCount; ++index) {
+        if (!matchesValue(category, forward_traffic::CategoryNames[index])) continue;
+        const auto& stats = _forwarding_stats[index];
+        snprintf(reply, 150, "%s airtime=%lu queue=%lu admitted-ms=%lu", forward_traffic::CategoryNames[index],
+                 static_cast<unsigned long>(stats.airtimeDrops), static_cast<unsigned long>(stats.queueDrops),
+                 static_cast<unsigned long>(stats.admittedAirtimeMs));
+        return;
+      }
+      strcpy(reply, "Err - unknown category; see rules traffic");
       return;
     }
     bool can_write = !client || client->isAdmin();

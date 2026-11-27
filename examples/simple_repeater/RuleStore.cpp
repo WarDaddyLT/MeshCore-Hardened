@@ -9,8 +9,9 @@ constexpr const char* Pending = "/hardened_rules_tmp";
 constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
 constexpr const char* Provisioned = "/hardened_rules_provisioned";
 constexpr const char* ForwardingHold = "/hardened_rules_hold";
-constexpr uint8_t Magic[] = {'M', 'C', 'H', 6};
-constexpr uint8_t LegacyMagic[] = {'M', 'C', 'H', 5};
+constexpr uint8_t Magic[] = {'M', 'C', 'H', 7};
+constexpr uint8_t LegacyTrafficMagic[] = {'M', 'C', 'H', 6};
+constexpr uint8_t LegacyRulesMagic[] = {'M', 'C', 'H', 5};
 constexpr char SigningDomain[] = "MeshCore Hardened policy v1";
 constexpr size_t SignedSize = sizeof(SigningDomain) + RuleStore::ScopeNameSize * 2
                             + offsetof(RuleStore::Rule, signature) + PUB_KEY_SIZE;
@@ -204,18 +205,22 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
     return complete;
   }
 
-  constexpr size_t legacyPrefix = offsetof(Snapshot, traffic);
   uint8_t legacyDigest[sizeof(snapshot.digest)];
-  bool complete = size == legacyPrefix + sizeof(legacyDigest)
-      && file.read(bytes, legacyPrefix) == legacyPrefix
+  constexpr size_t rulesPrefix = offsetof(Snapshot, traffic);
+  constexpr size_t trafficPrefix = offsetof(Snapshot, airtime_share);
+  const bool hasTraffic = size == trafficPrefix + sizeof(legacyDigest);
+  const size_t legacyPrefix = hasTraffic ? trafficPrefix : rulesPrefix;
+  const auto* legacyMagic = hasTraffic ? LegacyTrafficMagic : LegacyRulesMagic;
+  bool complete = size == legacyPrefix + sizeof(legacyDigest) && file.read(bytes, legacyPrefix) == legacyPrefix
       && file.read(legacyDigest, sizeof(legacyDigest)) == sizeof(legacyDigest);
   file.close();
-  if (!complete || memcmp(snapshot.magic, LegacyMagic, sizeof(LegacyMagic)) != 0) return false;
+  if (!complete || memcmp(snapshot.magic, legacyMagic, sizeof(Magic)) != 0) return false;
 
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, legacyPrefix);
   if (memcmp(legacyDigest, snapshot.digest, sizeof(legacyDigest)) != 0) return false;
   memcpy(snapshot.magic, Magic, sizeof(Magic));
-  snapshot.traffic = {};
+  if (!hasTraffic) snapshot.traffic = {};
+  snapshot.airtime_share = forward_traffic::DefaultAirtimeShare;
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, offsetof(Snapshot, digest));
   return true;
 }
@@ -223,6 +228,7 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
 bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
   if (memcmp(snapshot.magic, Magic, sizeof(Magic)) != 0
       || snapshot.restricted > 1 || snapshot.count > Capacity || snapshot.room_enabled > 1 || !snapshot.traffic.valid()
+      || snapshot.airtime_share > 100
       || snapshot.room_name[sizeof(snapshot.room_name) - 1]
       || snapshot.domain[ScopeNameSize - 1] || snapshot.region[ScopeNameSize - 1]) return false;
 
@@ -612,9 +618,10 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     return;
   }
   if (savemesh::matchesValue(command, "status")) {
-    snprintf(reply, 150, "rev=%lu active=%u deleted=%u capacity=%u mode=%s rate=%u",
+    snprintf(reply, 150, "rev=%lu active=%u deleted=%u capacity=%u mode=%s rate=%u airtime=%u",
              static_cast<unsigned long>(decodeRevision(_state.revision)), active, _state.count - active,
-             static_cast<unsigned>(Capacity), restricted() ? "restricted" : "open", unknownRate());
+             static_cast<unsigned>(Capacity), restricted() ? "restricted" : "open", unknownRate(),
+             airtimeShare());
     return;
   }
   if (savemesh::matchCommand(command, "list", &arg)) {
@@ -660,6 +667,18 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
       return;
     }
   }
+  uint16_t airtimeShareValue = 0;
+  const bool setAirtimeShare = savemesh::matchCommand(command, "airtime", &arg);
+  if (setAirtimeShare) {
+    if (!*arg) {
+      snprintf(reply, 150, "airtime=%u", airtimeShare());
+      return;
+    }
+    if (!savemesh::parseUnsigned(arg, &airtimeShareValue) || airtimeShareValue > 100) {
+      strcpy(reply, "Err - use airtime <0..100>");
+      return;
+    }
+  }
   if (!can_write) {
     strcpy(reply, "Err - write permission required");
     return;
@@ -698,6 +717,12 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
       return;
     }
     traffic.set(_candidate.traffic, trafficLimit);
+  } else if (setAirtimeShare) {
+    if (airtimeShare() == airtimeShareValue) {
+      strcpy(reply, "OK");
+      return;
+    }
+    _candidate.airtime_share = static_cast<uint8_t>(airtimeShareValue);
   } else if (savemesh::matchCommand(command, "delete", &arg)) {
     int index = find(arg);
     if (index < 0) {
@@ -795,7 +820,7 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
       }
     }
   } else {
-    strcpy(reply, "Err - use rules count/list/show/add/delete/status/mode/rate/traffic");
+    strcpy(reply, "Err - use rules count/list/show/add/delete/status/mode/rate/traffic/airtime");
     return;
   }
 

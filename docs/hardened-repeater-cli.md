@@ -29,14 +29,15 @@ rules add filter 1byte|data|public on|off [scope]
 rules delete <rule-id-or-prefix>
 rules mode open|restricted
 rules rate <packets-per-minute>
-rules drops
+rules airtime [percent]
+rules drops [category]
 ```
 
 Scope defaults to `local`. Use `global:<domain>` or `region:<name>` after provisioning sync. Rule changes and explicit sync requests require physical USB or the mesh admin role. Read-only and read-write ACL users can inspect rules and status. Use full 32-hex-character rule IDs when deleting. Prefixes of at least eight hex characters work when unique across active rules and retained deletion records. A shared rule is deleted on its originating repeater. `rules list` returns one active rule per response. Pass the returned `next` value as the next cursor until the response is `End`.
 
 The store supports 24 total entries, including deletion records. An update is written to the alternate snapshot and read back before the active state changes. It verifies snapshot integrity and rule signatures at boot. Retaining deletion records prevents old copies from restoring deleted rules, so new entries are rejected when the table fills. The last valid snapshot stays available when a write fails.
 
-Deny takes precedence over allow for a verified identity. Forwarding decisions use signed client and repeater advertisements. Traffic addressed to this device can also use the identity matched by its existing MeshCore management authentication. Forwarded legacy traffic without a verifiable sender follows packet-class policy. Restricted mode admits attributable traffic from allowed identities and preserves access for existing management ACL entries unless an explicit deny applies. `rules rate` adds a shared per-minute forwarding budget for anonymous requests and group packets. A value of `0` disables that added limit.
+Deny takes precedence over allow for a verified identity. Forwarding decisions use signed client and repeater advertisements. Traffic addressed to this device can also use the identity matched by its existing MeshCore management authentication. Forwarded legacy traffic without a verifiable sender follows packet-class policy. Restricted mode admits attributable traffic from allowed identities and preserves access for existing management ACL entries unless an explicit deny applies. `rules rate` applies the same per-minute packet count separately to anonymous requests, group text, and group data. A value of `0` disables that cap.
 
 Managed filter rules can add restrictions to the existing filters. The most specific active managed filter wins, in the order local, region, then global. Within a scope, revisions are ordered numerically with the originating key breaking ties. A managed `off` removes the restriction contributed by managed rules. Use the existing `filter` command for the independently persisted base filter.
 
@@ -66,9 +67,15 @@ Use decimal packet types `0` to `15` or hex `0x00` to `0x0f`. Omit the action to
 | `management` | Request, response, and control |
 | `other` | Reserved and custom types |
 
-A type drop or category drop blocks that traffic. An allow leaves the other configured controls in force, including the inherited SaveMeshcore filters and the legacy shared `rules rate` cap. A frame must fit every applicable type and category cap. RF and bridge export budgets are separate. The dispatcher still owns the radio airtime limit.
+A type drop or category drop blocks that traffic. An allow leaves the other configured controls in force, including the inherited SaveMeshcore filters and `rules rate`. A frame must fit every applicable type and category cap. RF and bridge exports use separate packet-count budgets.
 
-The rules store reads valid snapshots from builds before these controls and defaults their traffic settings to allow. The next policy write saves the expanded snapshot. Back up policy before installing an older build that lacks this snapshot format.
+Each RF forwarding category gets its own estimated airtime budget. `rules airtime` reads the current share, and `rules airtime <1..100>` sets it as a percentage of the configured dispatcher duty cycle. The default is 25%. At a configured 10% duty cycle, the default gives each category 2.5% of wall-clock time over sustained traffic. Each budget can accumulate credit for two maximum-size frames and charges the outgoing frame size at the current radio settings. `rules airtime 0` disables category airtime budgets. The dispatcher still enforces the shared radio limit for all transmissions, including local replies.
+
+Forwarding admission limits each category to four outstanding packets in the outbound queue and leaves three free packet buffers for other operations, including local management replies. Stock queue priority still applies. Legacy senders within one category share its budget. Local forwarding controls cannot prevent nearby radios from occupying the RF channel.
+
+`rules drops` shows totals by reason. `rules drops <category>` reports airtime drops, queue drops, and the estimated airtime admitted for RF forwarding. Admission totals include frames that may later fail to transmit. Use radio counters and path evidence to validate actual RF delivery.
+
+Valid v5 and v6 rule snapshots load with the default airtime share. A v5 snapshot also defaults its type and category packet policies to allow. The next policy write uses v7. Back up policy before installing an older build that lacks this snapshot format.
 
 ## Policy storage recovery
 

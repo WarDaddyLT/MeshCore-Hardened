@@ -96,6 +96,13 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint32_t _filter_drops = 0;
   uint32_t _identity_drops = 0;
   uint32_t _rate_drops = 0;
+  struct ForwardingStats {
+    uint32_t airtimeDrops = 0;
+    uint32_t queueDrops = 0;
+    uint32_t admittedAirtimeMs = 0;
+  };
+  ForwardingStats _forwarding_stats[forward_traffic::CategoryCount];
+  forward_traffic::AirtimeBudget _forwarding_airtime[forward_traffic::CategoryCount];
   forward_traffic::Budget _radio_forward_budget;
 #ifdef WITH_BRIDGE
   forward_traffic::Budget _bridge_forward_budget;
@@ -196,6 +203,7 @@ protected:
   }
 
   bool allowPacketForward(const mesh::Packet* packet) override;
+  bool admitForwardedPacket(const mesh::Packet* packet) override;
   const char* getLogDateTime() override;
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
 

@@ -39,6 +39,7 @@ public:
   void handleRecoveryCommand(const char* command, char* reply);
   bool restricted() const { return _state.restricted; }
   uint16_t unknownRate() const;
+  uint8_t airtimeShare() const { return _state.airtime_share; }
   const forward_traffic::Policy& trafficPolicy() const { return _state.traffic; }
   const uint8_t* neighbourChannel() const { return _state.neighbour_channel; }
   bool setNeighbourChannel(const uint8_t* key);
@@ -82,6 +83,7 @@ private:
     } remote_writers[8];
     Rule rules[Capacity];
     forward_traffic::Policy traffic;
+    uint8_t airtime_share = forward_traffic::DefaultAirtimeShare;
     uint8_t digest[32];
   };
 

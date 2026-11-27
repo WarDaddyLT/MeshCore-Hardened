@@ -7,6 +7,9 @@ namespace forward_traffic {
 constexpr unsigned TypeCount = 16;
 constexpr uint16_t Drop = UINT16_MAX;
 constexpr uint16_t MaxRate = 600;
+constexpr uint8_t DefaultAirtimeShare = 25;
+constexpr unsigned MaxQueuedPerCategory = 4;
+constexpr int ReservedFreePackets = 3;
 
 enum Category : uint8_t { GroupText, GroupData, DirectText, Discovery, Anonymous, Routing, Management, Other, CategoryCount };
 
@@ -63,7 +66,6 @@ struct Budget {
   uint32_t windowStart = 0;
   uint16_t types[TypeCount]{};
   uint16_t categories[CategoryCount]{};
-  uint16_t legacyCount = 0;
 
   bool admit(uint8_t type, const Policy& policy, uint16_t legacyRate, uint32_t now) {
     const auto category = categoryFor(type);
@@ -77,11 +79,32 @@ struct Budget {
       windowStart = now;
     }
     if ((typeRate && types[type] >= typeRate) || (categoryRate && categories[category] >= categoryRate)
-        || (legacyRate && legacyCount >= legacyRate)) return false;
+        || (legacyRate && categories[category] >= legacyRate)) return false;
 
     if (typeRate) ++types[type];
-    if (categoryRate) ++categories[category];
-    if (legacyRate) ++legacyCount;
+    if (categoryRate || legacyRate) ++categories[category];
+    return true;
+  }
+};
+
+// Credit is measured in thousandths of a millisecond of estimated airtime.
+struct AirtimeBudget {
+  uint32_t lastUpdate = 0;
+  uint32_t credit = 0;
+  bool started = false;
+
+  bool admit(uint32_t now, uint32_t airtime, uint32_t maxFrameAirtime, unsigned refillPerMs) {
+    constexpr uint32_t Scale = 1000;
+    const uint32_t capacity = 2 * Scale * maxFrameAirtime;
+    const uint64_t available = started
+        ? credit + uint64_t(now - lastUpdate) * refillPerMs
+        : capacity;
+    started = true;
+    lastUpdate = now;
+    credit = available < capacity ? static_cast<uint32_t>(available) : capacity;
+    const uint32_t cost = airtime * Scale;
+    if (cost > credit) return false;
+    credit -= cost;
     return true;
   }
 };

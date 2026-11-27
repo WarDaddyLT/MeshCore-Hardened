@@ -7,7 +7,7 @@
 MeshCore Hardened is repeater firmware for LoRa MeshCore networks. It retains the SaveMeshcore packet filters and adds persistent per-key rules, private direct-neighbour notices, encrypted policy synchronization between trusted repeaters, and an optional read-only administration room. Run official MeshCore firmware on your companion radios.
 
 > [!IMPORTANT]
-> A public-key blacklist can block a signed advertisement and restrict services addressed to this repeater. A stock private-channel text packet lacks a sender identity that a transit repeater can verify. In the bench run, the RAK3401 stopped forwarding the blacklisted M5's signed advert and continued forwarding its private group text. Use the channel and packet filters or the shared rate limit for traffic without a verifiable sender.
+> A public-key blacklist can block a signed advertisement and restrict services addressed to this repeater. A stock private-channel text packet lacks a sender identity that a transit repeater can verify. In the bench run, the RAK3401 stopped forwarding the blacklisted M5's signed advert and continued forwarding its private group text. Use the channel filters, packet policies, and category budgets for traffic without a verifiable sender.
 
 ## AI-Assisted Development Declaration
 
@@ -79,7 +79,7 @@ flowchart TD
     Route --> Policy["Apply base and managed packet restrictions"]
     Policy --> Identity{"Can the repeater verify the sender identity?"}
     Identity -->|"Signed client or repeater advert"| Decision["Evaluate the full public key"]
-    Identity -->|"Legacy transit traffic"| Budget["Apply the applicable shared rate limit"]
+    Identity -->|"Legacy transit traffic"| Budget["Apply packet, category airtime, and queue limits"]
     Decision -->|"Allowed by the policy"| Queue["Queue RF forwarding under the existing airtime scheduler"]
     Budget -->|"Budget available"| Queue
     Route -->|"Rejected"| Drop["Release frame"]
@@ -95,10 +95,10 @@ The diagram shows the checks that apply, as distinct packet paths run some check
 | Signed MeshCore client or repeater advert | The full Ed25519 public key and a verified signature. |
 | Management addressed to this repeater | MeshCore's existing shared-secret transport and ACL role. A deny rule for the matched client also applies. |
 | Group text and group data crossing this repeater | Packet class, path, region, rate, and recognizable Public-channel traffic. A channel key is shared by its members. |
-| Anonymous requests and ordinary direct transit traffic | The existing routing and packet-level policies. The shared rate setting covers anonymous requests and the two group packet classes. |
+| Anonymous requests and ordinary direct transit traffic | Routing and packet policies, including independent RF airtime budgets by category. |
 | Hardened policy updates | An authenticated encryption tag, an Ed25519 signature from a provisioned origin, and domain, scope, rule ID, and revision checks. |
 
-`rules drops` reports aggregate counters `filter`, `identity`, and `rate` since boot. These counters cover the corresponding Hardened decisions and are useful alongside the stock `stats-packets` and `stats-radio` USB commands. Use matching RF path evidence when proving that a given repeater transmitted a particular packet.
+`rules drops` reports filter, identity, packet-rate, airtime, and queue drops since boot. `rules drops <category>` shows RF airtime and queue drops, plus estimated airtime admitted to the queue for that category. Use the stock `stats-packets` and `stats-radio` USB commands and matching RF path evidence to confirm transmissions.
 
 ## Base filters and enforced settings
 
@@ -160,7 +160,7 @@ Replace bracketed or angle-bracketed placeholders with real values. Type a scope
 
 | Command | Effect |
 | --- | --- |
-| `rules status` | Shows revision, active and deleted entry counts, capacity, mode, and rate. |
+| `rules status` | Shows revision, active and deleted entry counts, capacity, mode, rate, and airtime share. |
 | `rules count` | Returns the number of active rules. |
 | `rules list [cursor]` | Returns one active rule with `next=<cursor>`. Keep passing the returned cursor until `End`. |
 | `rules show <id-or-prefix>` | Shows a specific active rule. |
@@ -171,9 +171,10 @@ Replace bracketed or angle-bracketed placeholders with real values. Type a scope
 | `rules add filter <1byte\|data\|public> <on\|off> [scope]` | Adds a scoped filter decision. |
 | `rules delete <id-or-prefix>` | Removes the selected rule and retains its deletion record. Delete shared rules on their originating repeater. |
 | `rules mode <open\|restricted>` | Selects the identity policy for traffic that the repeater can attribute. |
-| `rules rate <0–600>` | Sets the shared limit per minute for forwarded group text, group data, and anonymous requests. Use `0` to disable this cap. |
+| `rules rate <0–600>` | Sets an independent packet count limit per minute for each of group text, group data, and anonymous requests. Use `0` to disable this cap. |
 | `rules traffic type <id>` or `rules traffic category <name>` | Read or change local per-type and category forwarding policy. Actions are `allow`, `drop`, and `limit <packets-per-minute>`. |
-| `rules drops` | Shows the volatile filter, identity, and rate counters. |
+| `rules airtime [0–100]` | Reads or sets the percentage of the configured radio duty cycle that each RF forwarding category may use over time. Defaults to 25%. Use `0` to disable the per-category airtime share. |
+| `rules drops [category]` | Shows overall drops or airtime and queue statistics for one category. |
 
 For a controlled blacklist check:
 
@@ -193,7 +194,7 @@ A **deny** wins over **allow** for the same attributable subject. `open` is the 
 
 For managed filters, priority is local, then regional, then global. At the same scope the numerically higher revision wins, with the origin key breaking ties. A managed `off` removes the restriction from the winning managed rule. The effective forwarding filter stays on if the independently persisted base filter is on. Use the base `filter` command to change that setting.
 
-For example, the following commands add a local managed restriction, enable restricted identity policy, and limit the shared forwarding classes to 30 packets per minute. To return to open mode with the added rate cap disabled, use `rules mode open` and `rules rate 0`. Remove the example filter using the ID returned by its add command.
+The following commands add a local managed restriction, enable restricted identity policy, and limit group text, group data, and anonymous requests to 30 forwarding candidates per minute each. To return to open mode with the added packet cap disabled, use `rules mode open` and `rules rate 0`. Remove the example filter using the ID returned by its add command.
 
 ```text
 rules add filter public on local
