@@ -9,10 +9,10 @@ constexpr const char* Pending = "/hardened_rules_tmp";
 constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
 constexpr const char* Provisioned = "/hardened_rules_provisioned";
 constexpr const char* ForwardingHold = "/hardened_rules_hold";
-constexpr uint8_t Magic[] = {'M', 'C', 'H', 8};
-constexpr uint8_t LegacyAirtimeMagic[] = {'M', 'C', 'H', 7};
-constexpr uint8_t LegacyTrafficMagic[] = {'M', 'C', 'H', 6};
-constexpr uint8_t LegacyRulesMagic[] = {'M', 'C', 'H', 5};
+constexpr uint8_t Magic[] = {'M', 'C', 'H', 9};
+constexpr uint16_t MaxFreezeMinutes = 7 * 24 * 60;
+constexpr uint16_t DefaultFreezeMinutes = 60;
+constexpr uint32_t FreezeCheckpointSeconds = 15 * 60;
 constexpr char SigningDomain[] = "MeshCore Hardened policy v1";
 constexpr size_t SignedSize = sizeof(SigningDomain) + RuleStore::ScopeNameSize * 2
                             + offsetof(RuleStore::Rule, signature) + PUB_KEY_SIZE;
@@ -207,32 +207,37 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
   }
 
   uint8_t legacyDigest[sizeof(snapshot.digest)];
-  constexpr size_t rulesPrefix = offsetof(Snapshot, traffic);
-  constexpr size_t trafficPrefix = offsetof(Snapshot, airtime_share);
-  constexpr size_t airtimePrefix = offsetof(Snapshot, probation);
-  const bool hasTraffic = size == trafficPrefix + sizeof(legacyDigest);
-  const bool hasAirtime = size == airtimePrefix + sizeof(legacyDigest);
-  const size_t legacyPrefix = hasAirtime ? airtimePrefix : hasTraffic ? trafficPrefix : rulesPrefix;
-  const auto* legacyMagic = hasAirtime ? LegacyAirtimeMagic : hasTraffic ? LegacyTrafficMagic : LegacyRulesMagic;
-  bool complete = size == legacyPrefix + sizeof(legacyDigest) && file.read(bytes, legacyPrefix) == legacyPrefix
+  constexpr size_t prefixes[] = {offsetof(Snapshot, traffic), offsetof(Snapshot, airtime_share),
+                                 offsetof(Snapshot, probation), offsetof(Snapshot, freeze_seconds)};
+  uint8_t version = 5;
+  for (const size_t prefix : prefixes) {
+    if (size == prefix + sizeof(legacyDigest)) break;
+    ++version;
+  }
+  if (version >= Magic[3]) { file.close(); return false; }
+  const size_t legacyPrefix = prefixes[version - 5];
+  bool complete = file.read(bytes, legacyPrefix) == legacyPrefix
       && file.read(legacyDigest, sizeof(legacyDigest)) == sizeof(legacyDigest);
   file.close();
-  if (!complete || memcmp(snapshot.magic, legacyMagic, sizeof(Magic)) != 0 || snapshot.mode > LegacyRestricted) return false;
+  if (!complete || memcmp(snapshot.magic, Magic, 3) != 0 || snapshot.magic[3] != version
+      || snapshot.mode > (version >= 8 ? Protected : LegacyRestricted)) return false;
 
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, legacyPrefix);
   if (memcmp(legacyDigest, snapshot.digest, sizeof(legacyDigest)) != 0) return false;
   memcpy(snapshot.magic, Magic, sizeof(Magic));
-  if (!hasTraffic && !hasAirtime) snapshot.traffic = {};
-  if (!hasAirtime) snapshot.airtime_share = forward_traffic::DefaultAirtimeShare;
-  snapshot.probation = {};
+  if (version < 6) snapshot.traffic = {};
+  if (version < 7) snapshot.airtime_share = forward_traffic::DefaultAirtimeShare;
+  if (version < 8) snapshot.probation = {};
+  snapshot.freeze_seconds = {};
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, offsetof(Snapshot, digest));
   return true;
 }
 
 bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
   if (memcmp(snapshot.magic, Magic, sizeof(Magic)) != 0
-      || snapshot.mode > Protected || snapshot.count > Capacity || snapshot.room_enabled > 1 || !snapshot.traffic.valid()
+      || snapshot.mode > Locked || snapshot.count > Capacity || snapshot.room_enabled > 1 || !snapshot.traffic.valid()
       || !snapshot.probation.valid()
+      || snapshot.freeze_seconds.get() > uint32_t(MaxFreezeMinutes) * 60
       || snapshot.airtime_share > 100
       || snapshot.room_name[sizeof(snapshot.room_name) - 1]
       || snapshot.domain[ScopeNameSize - 1] || snapshot.region[ScopeNameSize - 1]) return false;
@@ -500,8 +505,9 @@ RuleStore::MergeResult RuleStore::mergeRule(Rule& rule, const uint8_t* fingerpri
   const uint8_t empty[PUB_KEY_SIZE]{};
   for (const auto& peer : _state.trusted_peers) {
     if (memcmp(peer, empty, sizeof(empty)) == 0 || node.matches(peer)
-        || memcmp(peer, fingerprint, FingerprintSize) != 0
-        || decide(Repeater, peer) == Denied) continue;
+        || memcmp(peer, fingerprint, FingerprintSize) != 0) continue;
+    const auto decision = decide(Repeater, peer);
+    if (decision == Denied || (mode() == Locked && decision != Allowed)) continue;
     memcpy(rule.origin, peer, PUB_KEY_SIZE);
     signableBytes(_state, rule, signed_bytes);
     if (mesh::Identity(peer).verify(rule.signature, signed_bytes, sizeof(signed_bytes))) {
@@ -545,10 +551,31 @@ RuleStore::Decision RuleStore::decide(Subject subject, const uint8_t* key) const
 
 const char* RuleStore::modeName() const {
   switch (mode()) {
+    case Locked: return "locked";
     case Protected: return "protected";
     case LegacyRestricted: return "restricted";
     default: return "normal";
   }
+}
+
+uint32_t RuleStore::freezeRemaining(uint64_t uptimeMs) const {
+  const uint32_t saved = _state.freeze_seconds.get();
+  // A monotonic clock regression must not shorten a restriction.
+  const uint64_t passed = uptimeMs >= _freezeAnchor ? (uptimeMs - _freezeAnchor) / 1000 : 0;
+  return passed < saved ? saved - static_cast<uint32_t>(passed) : 0;
+}
+
+void RuleStore::advanceFreeze(uint64_t uptimeMs) {
+  if (!forwardingAllowed() || !enrollmentFrozen() || uptimeMs < _nextFreezeWrite) return;
+  const uint32_t remaining = freezeRemaining(uptimeMs);
+  if (remaining && _state.freeze_seconds.get() - remaining < FreezeCheckpointSeconds) return;
+  const uint32_t revision = decodeRevision(_state.revision);
+  if (revision == UINT32_MAX) return;
+  _nextFreezeWrite = uptimeMs + 60000;
+  _candidate = _state;
+  _candidate.freeze_seconds.set(remaining);
+  encodeRevision(_candidate.revision, revision + 1);
+  if (commit()) restartFreezeTimer(uptimeMs);
 }
 
 bool RuleStore::saveProbation(const probation::Snapshot& state) {
@@ -626,7 +653,7 @@ const char* RuleStore::parseScope(const char* input, uint8_t& scope) const {
 
 void RuleStore::handleCommand(const char* command, char* reply, const mesh::LocalIdentity& node,
                               const mesh::Identity* issuer, uint32_t timestamp, mesh::RNG& rng,
-                              bool can_write, bool can_publish, bool& sync_requested) {
+                              bool can_write, bool can_publish, bool& sync_requested, uint64_t uptimeMs) {
   if (!_ready) {
     strcpy(reply, "Err - rule storage unavailable; use rules recovery over USB");
     return;
@@ -640,10 +667,10 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     return;
   }
   if (savemesh::matchesValue(command, "status")) {
-    snprintf(reply, 150, "rev=%lu active=%u deleted=%u capacity=%u mode=%s rate=%u airtime=%u",
+    snprintf(reply, 150, "rev=%lu active=%u deleted=%u capacity=%u mode=%s rate=%u airtime=%u freeze=%s",
              static_cast<unsigned long>(decodeRevision(_state.revision)), active, _state.count - active,
              static_cast<unsigned>(Capacity), modeName(), unknownRate(),
-             airtimeShare());
+             airtimeShare(), enrollmentFrozen() ? "active" : "off");
     return;
   }
   if (savemesh::matchCommand(command, "list", &arg)) {
@@ -665,6 +692,13 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
   }
   if (savemesh::matchesValue(command, "mode")) {
     snprintf(reply, 150, "mode=%s", modeName());
+    return;
+  }
+  const char* freezeArgs;
+  const bool setFreeze = savemesh::matchCommand(command, "freeze", &freezeArgs);
+  if (setFreeze && !*freezeArgs) {
+    snprintf(reply, 150, "freeze=%s remaining-seconds=%lu", enrollmentFrozen() ? "active" : "off",
+             static_cast<unsigned long>(freezeRemaining(uptimeMs)));
     return;
   }
   TrafficTarget traffic{};
@@ -737,7 +771,35 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
   }
   encodeRevision(_candidate.revision, revision + 1);
   Rule* changed = nullptr;
-  if (setTraffic) {
+  if (setFreeze) {
+    const char* duration;
+    if (savemesh::matchesValue(freezeArgs, "end")) {
+      if (!enrollmentFrozen()) { strcpy(reply, "OK"); return; }
+      _candidate.freeze_seconds.set(0);
+    } else {
+      const bool extending = savemesh::matchCommand(freezeArgs, "extend", &duration);
+      if (!extending && !savemesh::matchCommand(freezeArgs, "start", &duration)) {
+        strcpy(reply, "Err - use freeze start [minutes], extend <minutes> or end");
+        return;
+      }
+      if (enrollmentFrozen() != extending) {
+        strcpy(reply, extending ? "Err - freeze is off" : "Err - freeze active; use extend or end");
+        return;
+      }
+      uint16_t minutes = DefaultFreezeMinutes;
+      if (((*duration || extending) && !savemesh::parseUnsigned(duration, &minutes))
+          || !minutes || minutes > MaxFreezeMinutes) {
+        strcpy(reply, "Err - expected 1..10080 minutes");
+        return;
+      }
+      const uint32_t seconds = (extending ? freezeRemaining(uptimeMs) : 0) + uint32_t(minutes) * 60;
+      if (seconds > uint32_t(MaxFreezeMinutes) * 60) {
+        strcpy(reply, "Err - combined freeze exceeds seven days");
+        return;
+      }
+      _candidate.freeze_seconds.set(seconds);
+    }
+  } else if (setTraffic) {
     if (traffic.select(_state.traffic).get() == trafficLimit) {
       strcpy(reply, "OK");
       return;
@@ -768,9 +830,10 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
   } else if (savemesh::matchCommand(command, "mode", &arg)) {
     if (savemesh::matchesValue(arg, "restricted")) _candidate.mode = LegacyRestricted;
     else if (savemesh::matchesValue(arg, "protected")) _candidate.mode = Protected;
+    else if (savemesh::matchesValue(arg, "locked")) _candidate.mode = Locked;
     else if (savemesh::matchesValue(arg, "normal") || savemesh::matchesValue(arg, "open")) _candidate.mode = Normal;
     else {
-      strcpy(reply, "Err - use normal, protected or restricted");
+      strcpy(reply, "Err - use normal, protected, locked or restricted");
       return;
     }
     if (_candidate.mode == _state.mode) {
@@ -867,6 +930,7 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     strcpy(reply, "Err - rule storage write failed");
     return;
   }
+  if (setFreeze) restartFreezeTimer(uptimeMs);
   sync_requested = changed && changed->scope != Local;
   if (changed && !changed->deleted) {
     strcpy(reply, "OK ");

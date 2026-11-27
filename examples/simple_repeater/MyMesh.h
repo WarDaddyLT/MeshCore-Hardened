@@ -100,6 +100,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint32_t _identity_drops = 0;
   uint32_t _rate_drops = 0;
   uint32_t _probation_drops = 0;
+  uint32_t _locked_drops = 0;
   uint32_t _frame_drops = 0;
   uint32_t _delayed_drops = 0;
   uint32_t _invalid_adverts = 0;

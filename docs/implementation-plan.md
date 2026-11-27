@@ -13,6 +13,7 @@ Build and flash development firmware as each feature lands. Formal native and fo
 | Bounded receive work | IN PROGRESS (RF validation pending) | Early frame and duplicate checks, bounded verification and delayed queues, and volatile diagnostics instead of a persistent packet log. CPU, queue and airtime measurements under controlled RF load are pending. |
 | Device trust and activity | IN PROGRESS (RF validation pending) | Persistent full-key trust rules, denies across advertised roles, and bounded recent advert counts and quotas in RAM. Legacy traffic still uses category controls. |
 | Protected mode | IN PROGRESS (RF validation pending) | Drops unattributable transit, keeps authenticated management available, and applies a bounded 72-hour probation to fresh verified RF keys. |
+| Locked mode and enrollment freeze | IN PROGRESS (RF validation pending) | Fresh allowlisted transit, persistent independent freeze, conservative expiry, and local operator recovery. |
 | Direct-neighbour notifications | VERIFIED (build) | Private-channel notices for verified zero-hop observations, with a bounded deduplication table and send interval. |
 | Policy synchronization | VERIFIED (build) | Signed, encrypted global and regional updates between provisioned repeaters, including deletion records and explicit reconciliation. |
 | Optional room identity | VERIFIED (build) | Separate persistent room identity, signed contact export, and a read-only room adapter. It defaults off pending stock Android validation. |

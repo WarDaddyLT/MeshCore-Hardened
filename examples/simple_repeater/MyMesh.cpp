@@ -102,13 +102,14 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
 
   if (!client || data[0] != 0) {
     const char* password = reinterpret_cast<const char*>(data);
-    // Existing administrators can sign in in either mode. Password-based
-    // enrollment and promotion are available in Normal.
+    // Existing administrators can sign in in every mode. New password-based
+    // administrator enrollment requires Normal with enrollment open.
     bool admin_password_matches = _prefs.password[0]
         && strncmp(password, _prefs.password, sizeof(_prefs.password)) == 0;
     if (admin_password_matches) {
       if (!client || !client->isAdmin()) {
-        if (!_rules.forwardingAllowed() || _rules.mode() != RuleStore::Normal || acl.needsRecovery()) return 0;
+        if (!_rules.forwardingAllowed() || _rules.mode() != RuleStore::Normal || _rules.enrollmentFrozen()
+            || acl.needsRecovery()) return 0;
         uint8_t permissions = client ? client->permissions & ~PERM_ACL_ROLE_MASK : 0;
         permissions |= PERM_ACL_ADMIN;
         if (!acl.updatePermissions(self_id, sender.pub_key, PUB_KEY_SIZE, permissions)) return 0;
@@ -118,6 +119,7 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
       if (strncmp(password, _prefs.guest_password, sizeof(_prefs.guest_password)) != 0
           || (client && (client->permissions & PERM_ACL_ROLE_MASK) != PERM_ACL_GUEST)) return 0;
       if (!client) {
+        if (!_rules.forwardingAllowed() || _rules.enrollmentFrozen()) return 0;
         client = acl.putClient(sender, PERM_ACL_GUEST, true);
         if (!client) return 0;
         memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
@@ -448,9 +450,10 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
     ++_filter_drops;
     return false;
   }
-  if (_rules.mode() == RuleStore::Protected && packet->getPayloadType() != PAYLOAD_TYPE_ADVERT
+  if (_rules.strictTransit() && packet->getPayloadType() != PAYLOAD_TYPE_ADVERT
       && packet != _verified_policy_forward) {
-    ++_identity_drops;
+    if (_rules.mode() == RuleStore::Locked) ++_locked_drops;
+    else ++_identity_drops;
     return false;
   }
   if (packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
@@ -560,6 +563,11 @@ bool MyMesh::allowVerifiedAdvert(const mesh::Packet& packet, bool observe) {
 
   uint32_t stamp;
   memcpy(&stamp, packet.payload + PUB_KEY_SIZE, sizeof(stamp));
+  if (_rules.mode() == RuleStore::Locked && (subject == RuleStore::AnyDevice || decision != RuleStore::Allowed
+      || !probation::freshStamp(stamp, getRTCClock()->getCurrentTime(), uptime_millis))) {
+    ++_locked_drops;
+    return false;
+  }
   if (_rules.mode() == RuleStore::Protected && (subject == RuleStore::AnyDevice || decision != RuleStore::Allowed)) {
     if (subject == RuleStore::AnyDevice || !observe || !packet.received_over_radio) {
       ++_identity_drops;
@@ -569,7 +577,8 @@ bool MyMesh::allowVerifiedAdvert(const mesh::Packet& packet, bool observe) {
     const auto hasDecision = [this](const uint8_t* key, uint8_t storedSubject) {
       return _rules.decide(static_cast<RuleStore::Subject>(storedSubject), key) != RuleStore::Unknown;
     };
-    if (_probation.admit(packet.payload, subject, stamp, getRTCClock()->getCurrentTime(), uptime_millis, transit, hasDecision)) {
+    if (_probation.admit(packet.payload, subject, stamp, getRTCClock()->getCurrentTime(), uptime_millis, transit,
+                         hasDecision, !_rules.enrollmentFrozen())) {
       return true;
     }
     if (transit) ++_probation_drops;
@@ -639,7 +648,7 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 bool MyMesh::shouldExportToBridge(mesh::Packet* packet) {
   if (_prefs.disable_fwd || !_rules.forwardingAllowed() || !admitReceivedPacket(packet)
       || shouldDropByFilter(packet)) return false;
-  if (_rules.mode() == RuleStore::Protected && packet->getPayloadType() != PAYLOAD_TYPE_ADVERT) return false;
+  if (_rules.strictTransit() && packet->getPayloadType() != PAYLOAD_TYPE_ADVERT) return false;
   if (packet->isRouteFlood()) {
     if (mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max, _prefs.flood_max_unscoped,
                                     _prefs.flood_max_advert)) return false;
@@ -1176,7 +1185,7 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
 void MyMesh::onControlDataRecv(mesh::Packet* packet) {
   uint8_t type = packet->payload[0] & 0xF0;    // just test upper 4 bits
   if (type == CTL_TYPE_NODE_DISCOVER_REQ && packet->payload_len >= 6
-      && _rules.mode() != RuleStore::Protected
+      && !_rules.strictTransit()
       && !_prefs.disable_fwd && discover_limiter.allow(rtc_clock.getCurrentTime())
       && !isHiddenNode()   // this node wishes to NOT be discoverable
   ) {
@@ -1727,6 +1736,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
         _rules.handleRecoveryCommand(args, reply);
         if (strncmp(reply, "OK", 2) == 0 && matchCommand(args, "recover", &recovery_arg)) {
           _probation.begin(_rules.probationState(), uptime_millis);
+          _rules.restartFreezeTimer(uptime_millis);
         }
       }
       return;
@@ -1761,10 +1771,11 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
           airtimeDrops += stats.airtimeDrops;
           queueDrops += stats.queueDrops;
         }
-        snprintf(reply, 150, "filter=%lu identity=%lu rate=%lu airtime=%lu queue=%lu probation=%lu",
+        snprintf(reply, 150, "filter=%lu identity=%lu rate=%lu airtime=%lu queue=%lu probation=%lu locked=%lu",
                  static_cast<unsigned long>(_filter_drops), static_cast<unsigned long>(_identity_drops),
                  static_cast<unsigned long>(_rate_drops), static_cast<unsigned long>(airtimeDrops),
-                 static_cast<unsigned long>(queueDrops), static_cast<unsigned long>(_probation_drops));
+                 static_cast<unsigned long>(queueDrops), static_cast<unsigned long>(_probation_drops),
+                 static_cast<unsigned long>(_locked_drops));
         return;
       }
       for (unsigned index = 0; index < forward_traffic::CategoryCount; ++index) {
@@ -1783,8 +1794,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     bool sync_requested = false;
     const auto previousMode = _rules.mode();
     _rules.handleCommand(args, reply, self_id, client ? &client->id : nullptr,
-                         sender_timestamp, *getRNG(), can_write, can_write, sync_requested);
-    if (_rules.mode() == RuleStore::Protected && previousMode != RuleStore::Protected) {
+                         sender_timestamp, *getRNG(), can_write, can_write, sync_requested, uptime_millis);
+    if (_rules.strictTransit() && previousMode != _rules.mode()) {
       while (_mgr->getOutboundTotal()) releasePacket(_mgr->removeOutboundByIdx(0));
     }
     if (sync_requested) _sync_cursor = 0;
@@ -1943,6 +1954,7 @@ void MyMesh::loop() {
   uint32_t now = millis();
   uptime_millis += now - last_millis;
   last_millis = now;
+  _rules.advanceFreeze(uptime_millis);
   if (_rules.forwardingAllowed()) {
     _probation.checkpoint(uptime_millis, [this](const probation::Snapshot& state) {
       return _rules.saveProbation(state);

@@ -17,7 +17,7 @@ public:
   enum Decision : uint8_t { Unknown, Allowed, Denied };
   enum Scope : uint8_t { Local, Region, Global };
   // Keep the on-disk values used by open and restricted in v5–v7 snapshots.
-  enum Mode : uint8_t { Normal = 0, LegacyRestricted = 1, Protected = 2 };
+  enum Mode : uint8_t { Normal = 0, LegacyRestricted = 1, Protected = 2, Locked = 3 };
 
   struct Rule {
     uint8_t id[IdSize];
@@ -41,9 +41,13 @@ public:
   bool forwardingAllowed() const { return _ready && !_forwarding_hold; }
   void handleRecoveryCommand(const char* command, char* reply);
   Mode mode() const { return static_cast<Mode>(_state.mode); }
+  bool strictTransit() const { return mode() == Protected || mode() == Locked; }
   const char* modeName() const;
   const probation::Snapshot& probationState() const { return _state.probation; }
   bool saveProbation(const probation::Snapshot& state);
+  bool enrollmentFrozen() const { return _state.freeze_seconds.get() != 0; }
+  void advanceFreeze(uint64_t uptimeMs);
+  void restartFreezeTimer(uint64_t uptimeMs) { _freezeAnchor = uptimeMs; _nextFreezeWrite = 0; }
   uint16_t unknownRate() const;
   uint8_t airtimeShare() const { return _state.airtime_share; }
   const forward_traffic::Policy& trafficPolicy() const { return _state.traffic; }
@@ -66,7 +70,7 @@ public:
   static constexpr size_t FingerprintSize = 6;
   void handleCommand(const char* command, char* reply, const mesh::LocalIdentity& node,
                      const mesh::Identity* issuer, uint32_t timestamp, mesh::RNG& rng, bool can_write,
-                     bool can_publish, bool& sync_requested);
+                     bool can_publish, bool& sync_requested, uint64_t uptimeMs = 0);
 
 private:
   struct Snapshot {
@@ -91,6 +95,7 @@ private:
     forward_traffic::Policy traffic;
     uint8_t airtime_share = forward_traffic::DefaultAirtimeShare;
     probation::Snapshot probation;
+    probation::Seconds freeze_seconds;
     uint8_t digest[32];
   };
 
@@ -101,6 +106,8 @@ private:
   bool _ready = false;
   bool _forwarding_hold = false;
   uint8_t _invalid_slots = 0;
+  uint64_t _freezeAnchor = 0;
+  uint64_t _nextFreezeWrite = 0;
 
   bool load(const char* path, Snapshot& snapshot);
   bool verifyCandidate(const char* path, const uint8_t* digest);
@@ -111,4 +118,5 @@ private:
   const char* parseScope(const char* input, uint8_t& scope) const;
   int find(const char* id) const;
   void describe(size_t index, char* reply) const;
+  uint32_t freezeRemaining(uint64_t uptimeMs) const;
 };
