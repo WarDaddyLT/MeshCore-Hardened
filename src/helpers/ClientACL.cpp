@@ -94,12 +94,14 @@ ClientInfo* ClientACL::getClient(const uint8_t* pubkey, int key_len) {
   return NULL;  // not found
 }
 
-ClientInfo* ClientACL::putClient(const mesh::Identity& id, uint8_t init_perms) {
+ClientInfo* ClientACL::putClient(const mesh::Identity& id, uint8_t init_perms, bool evict_guests_only) {
   uint32_t min_time = 0xFFFFFFFF;
-  ClientInfo* oldest = &clients[MAX_CLIENTS - 1];
+  ClientInfo* oldest = evict_guests_only ? nullptr : &clients[MAX_CLIENTS - 1];
   for (int i = 0; i < num_clients; i++) {
     if (id.matches(clients[i].id)) return &clients[i];  // already known
-    if (!clients[i].isAdmin() && clients[i].last_activity < min_time) {
+    uint8_t role = clients[i].permissions & PERM_ACL_ROLE_MASK;
+    if (role != PERM_ACL_ADMIN && (!evict_guests_only || role == PERM_ACL_GUEST)
+        && (!oldest || clients[i].last_activity < min_time)) {
       oldest = &clients[i];
       min_time = oldest->last_activity;
     }
@@ -108,8 +110,10 @@ ClientInfo* ClientACL::putClient(const mesh::Identity& id, uint8_t init_perms) {
   ClientInfo* c;
   if (num_clients < MAX_CLIENTS) {
     c = &clients[num_clients++];
-  } else {
+  } else if (oldest) {
     c = oldest;  // evict least active contact
+  } else {
+    return nullptr;
   }
   memset(c, 0, sizeof(*c));
   c->permissions = init_perms;
@@ -118,7 +122,8 @@ ClientInfo* ClientACL::putClient(const mesh::Identity& id, uint8_t init_perms) {
   return c;
 }
 
-bool ClientACL::applyPermissions(const mesh::LocalIdentity& self_id, const uint8_t* pubkey, int key_len, uint8_t perms) {
+bool ClientACL::applyPermissions(const mesh::LocalIdentity& self_id, const uint8_t* pubkey, int key_len,
+                                 uint8_t perms, bool evict_guests_only) {
   ClientInfo* c;
   if ((perms & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) {  // guest role is not persisted in contacts
     c = getClient(pubkey, key_len);
@@ -134,7 +139,8 @@ bool ClientACL::applyPermissions(const mesh::LocalIdentity& self_id, const uint8
     if (key_len < PUB_KEY_SIZE) return false;   // need complete pubkey when adding/modifying
 
     mesh::Identity id(pubkey);
-    c = putClient(id, 0);
+    c = putClient(id, 0, evict_guests_only);
+    if (!c) return false;
 
     c->permissions = perms;  // update their permissions
     self_id.calcSharedSecret(c->shared_secret, pubkey);

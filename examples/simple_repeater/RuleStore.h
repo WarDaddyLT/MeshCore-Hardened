@@ -34,6 +34,7 @@ public:
   void begin(FILESYSTEM* fs, const mesh::LocalIdentity& node);
   Decision decide(Subject subject, const uint8_t* key) const;
   bool filterEnabled(Subject subject) const;
+  bool isReady() const { return _ready; }
   bool restricted() const { return _state.restricted; }
   uint16_t unknownRate() const;
   const uint8_t* neighbourChannel() const { return _state.neighbour_channel; }

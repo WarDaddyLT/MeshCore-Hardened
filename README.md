@@ -143,7 +143,7 @@ get acl
 setperm <companion-public-key> 3
 ```
 
-After provisioning, select the **primary repeater contact** in your MeshCore companion app, use its remote management login, and send CLI commands there. The stock repeater login supports an empty password for a provisioned ACL key where the client permits it. Use `password <new-password>` over USB to replace an inherited administrator password. The stock CLI echoes the password in its reply, so keep that command out of shared logs. `get acl` is a USB diagnostic. `setperm <companion-public-key> 0` removes the role.
+Use **Access control** in the MeshCore USB web configurator or `setperm` over the USB console to approve a key directly. In normal operation, the current `open` setting, the stock remote login can also enroll a key using a configured admin password. Set it with `password <new-password>` or leave it unset for key-only access. The current `restricted` setting blocks password-based enrollment. An enrolled key can still log in with an empty password where the client permits it. Use `get acl` over USB to inspect roles and `setperm <companion-public-key> 0` to revoke one. In `open`, rotate or clear the enrollment password if the revoked operator knows it. Browser and Android checks on hardware remain pending.
 
 | Existing ACL role | Hardened access over the primary repeater CLI |
 | --- | --- |
