@@ -104,13 +104,16 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
     const char* password = reinterpret_cast<const char*>(data);
     // Open is the current CLI equivalent of Normal. Strict modes retain the ACL
     // login path and prevent password-based enrollment or promotion.
-    bool admin_login = _rules.isReady() && !_rules.restricted() && !acl.needsRecovery()
-        && _prefs.password[0] && strncmp(password, _prefs.password, sizeof(_prefs.password)) == 0;
-    if (admin_login) {
-      uint8_t permissions = client ? client->permissions & ~PERM_ACL_ROLE_MASK : 0;
-      permissions |= PERM_ACL_ADMIN;
-      if (!acl.updatePermissions(self_id, sender.pub_key, PUB_KEY_SIZE, permissions)) return 0;
-      client = acl.getClient(sender.pub_key, PUB_KEY_SIZE);
+    bool admin_password_matches = _prefs.password[0]
+        && strncmp(password, _prefs.password, sizeof(_prefs.password)) == 0;
+    if (admin_password_matches) {
+      if (!client || !client->isAdmin()) {
+        if (!_rules.isReady() || _rules.restricted() || acl.needsRecovery()) return 0;
+        uint8_t permissions = client ? client->permissions & ~PERM_ACL_ROLE_MASK : 0;
+        permissions |= PERM_ACL_ADMIN;
+        if (!acl.updatePermissions(self_id, sender.pub_key, PUB_KEY_SIZE, permissions)) return 0;
+        client = acl.getClient(sender.pub_key, PUB_KEY_SIZE);
+      }
     } else {
       if (strncmp(password, _prefs.guest_password, sizeof(_prefs.guest_password)) != 0
           || (client && (client->permissions & PERM_ACL_ROLE_MASK) != PERM_ACL_GUEST)) return 0;
