@@ -337,7 +337,9 @@ def preflight(devices, config):
         policy = device.details["policy"]
         if policy.get("mode") not in ("normal", "open"):
             raise Skip(f"{role} must start in Normal.")
-        if int(policy["active"]) + int(policy["deleted"]) >= int(policy["capacity"]):
+        available = int(policy["free"]) if "free" in policy else (
+            int(policy["capacity"]) - int(policy["active"]) - int(policy["deleted"]))
+        if available < 1:
             raise Skip(f"{role} needs one available rule slot.")
         for peer in ("ADMIN", "ACTOR"):
             decision = pairs(device.cli(f"rules device client {devices[peer].key}"))

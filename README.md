@@ -223,7 +223,7 @@ sequenceDiagram
 
 Rules have a random 128-bit ID, a revision, a subject, a scope, an issuer, and a signature made by the originating repeater. The store alternates between `/hardened_rules_a` and `/hardened_rules_b`. It verifies the written copy before acknowledging a change and selects the newest valid snapshot at boot. The stored management timestamp for a remote writer also prevents replaying older successful mutations after reboot. There are eight remote-writer timestamp slots.
 
-The **24-entry** capacity includes active rules and deletion records. Deletion retains the existing slot so an old shared copy cannot resurrect the rule. When full, the firmware rejects new entries. Existing entries can still be deleted, with their slots retained. `rules status` shows the local store revision, which also advances for configuration changes and incoming shared updates. Confirm delivery by inspecting the receiving repeater.
+The rule store has **24 entries**. A deleted local rule's slot becomes reusable when new rules need it. Shared deletions retain their slots to prevent old copies from restoring those rules. `rules status` shows available slots in `free` and the local revision. Confirm shared rule delivery by inspecting the receiving repeater.
 
 ## Private direct-neighbour notices
 
@@ -357,7 +357,7 @@ Use the cursor in the actual reply when paging. The adapter keeps up to eight in
 | The blacklisted device is still audible | Check the packet class and actual path. Nearby recipients can hear a direct transmission, other repeaters may route it, and legacy transit text has no verifiable per-sender key. |
 | A remote rule command is rejected | Confirm the primary contact and ACL role over USB. Shared writes require the admin role. A writer's command timestamp must advance. |
 | An ID prefix is ambiguous | Use the complete 32-hex-character rule ID returned by the add command. |
-| Rule storage is full | Check `active`, `deleted`, and `capacity` in `rules status`. Deletions deliberately retain their slots. |
+| Rule storage is full | Check `active`, `deleted`, and `free` in `rules status`. Deleting a local rule releases space for a new rule. |
 | Rule storage is unavailable or forwarding is held | Run `rules recovery` over USB. A missing or corrupt committed policy blocks forwarding. Recover a readable revision or initialize empty policy on USB, review the policy, and then run `rules resume`. |
 | No neighbour appears | Check the private channel is set, send a signed zero-hop advert over RF, enroll a client with an allow rule, check for a deny, and inspect `neighbours status`. |
 | Peer does not receive a rule | Check the sync key, domain, region flood configuration, origin trust, and rule scope. Start `rules sync` and allow time for queued updates. Inspect state on the receiving peer. |
