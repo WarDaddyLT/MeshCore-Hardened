@@ -449,11 +449,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
     return false;
   }
   if (packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
-    if (!verifyReceivedAdvert(*packet)) return false;
-    if (shouldDropAdvert(packet)) {
-      ++_identity_drops;
-      return false;
-    }
+    if (!verifyReceivedAdvert(*packet) || !allowVerifiedAdvert(*packet, true)) return false;
   }
   return !shouldDropByRate(packet, _radio_forward_budget);
 }
@@ -537,24 +533,57 @@ bool MyMesh::verifyReceivedAdvert(const mesh::Packet& packet) {
   return verified;
 }
 
-bool MyMesh::shouldDropAdvert(const mesh::Packet* packet) const {
+bool MyMesh::allowVerifiedAdvert(const mesh::Packet& packet, bool observe) {
   constexpr size_t SignedPrefixSize = PUB_KEY_SIZE + sizeof(uint32_t);
   constexpr size_t AdvertPrefixSize = SignedPrefixSize + SIGNATURE_SIZE;
-  if (packet->getPayloadType() != PAYLOAD_TYPE_ADVERT) return false;
-  if (packet->payload_len < AdvertPrefixSize) return true;
+  if (packet.payload_len < AdvertPrefixSize) return false;
 
-  size_t app_len = std::min<size_t>(packet->payload_len - AdvertPrefixSize, MAX_ADVERT_DATA_SIZE);
-  const uint8_t* app_data = packet->payload + AdvertPrefixSize;
+  const size_t app_len = packet.payload_len - AdvertPrefixSize;
+  const uint8_t* app_data = packet.payload + AdvertPrefixSize;
   AdvertDataParser parser(app_data, app_len);
-  if (!parser.isValid()) return false;
+  RuleStore::Subject subject = RuleStore::AnyDevice;
+  if (parser.isValid()) {
+    if (parser.getType() == ADV_TYPE_REPEATER) subject = RuleStore::Repeater;
+    else if (parser.getType() == ADV_TYPE_CHAT) subject = RuleStore::Client;
+  }
+  const auto decision = _rules.decide(subject, packet.payload);
+  if (decision == RuleStore::Denied || (subject != RuleStore::AnyDevice
+      && decision == RuleStore::Unknown && _rules.restricted())) {
+    ++_identity_drops;
+    return false;
+  }
+  if (!observe || !packet.received_over_radio || subject == RuleStore::AnyDevice) return true;
 
+  uint32_t stamp;
+  memcpy(&stamp, packet.payload + PUB_KEY_SIZE, sizeof(stamp));
+  const auto isEnrolled = [this](const uint8_t* key) {
+    return _rules.decide(RuleStore::AnyDevice, key) == RuleStore::Allowed;
+  };
+  const bool enrolled = decision == RuleStore::Allowed || isEnrolled(packet.payload);
+  if (_device_activity.admit(packet.payload, enrolled, stamp, getRTCClock()->getCurrentTime(), isEnrolled)) return true;
+  ++_rate_drops;
+  return false;
+}
+
+void MyMesh::describeDevice(const char* args, char* reply) {
+  const char* keyText;
   RuleStore::Subject subject;
-  if (parser.getType() == ADV_TYPE_REPEATER) subject = RuleStore::Repeater;
-  else if (parser.getType() == ADV_TYPE_CHAT) subject = RuleStore::Client;
-  else return false;
-
-  auto decision = _rules.decide(subject, packet->payload);
-  return decision == RuleStore::Denied || (decision == RuleStore::Unknown && _rules.restricted());
+  if (matchCommand(args, "client", &keyText)) subject = RuleStore::Client;
+  else if (matchCommand(args, "repeater", &keyText)) subject = RuleStore::Repeater;
+  else {
+    strcpy(reply, "Err - use rules device <client|repeater> <public-key>");
+    return;
+  }
+  uint8_t key[PUB_KEY_SIZE];
+  if (!savemesh::isHex(keyText, sizeof(key) * 2) || !mesh::Utils::fromHex(key, sizeof(key), keyText)) {
+    strcpy(reply, "Err - expected full public key");
+    return;
+  }
+  const auto decision = _rules.decide(subject, key);
+  const char* status = decision == RuleStore::Denied ? "denied" : decision == RuleStore::Allowed ? "allowed" : "unknown";
+  const bool enrolled = _rules.decide(RuleStore::AnyDevice, key) == RuleStore::Allowed;
+  const auto stats = _device_activity.stats(key, enrolled, getRTCClock()->getCurrentTime());
+  snprintf(reply, 150, "trust=%s adverts=%u limited=%u", status, stats.observations, stats.limited);
 }
 
 bool MyMesh::shouldDenyClient(const mesh::Identity& id) {
@@ -599,7 +628,7 @@ bool MyMesh::shouldExportToBridge(mesh::Packet* packet) {
   if (packet->getPayloadType() == PAYLOAD_TYPE_CONTROL && packet->payload_len == PolicyPayloadSize
       && packet->payload[0] == PolicyType) return false;
   if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
-      && (!verifyReceivedAdvert(*packet) || shouldDropAdvert(packet))) return false;
+      && (!verifyReceivedAdvert(*packet) || !allowVerifiedAdvert(*packet, false))) return false;
   return !shouldDropByRate(packet, _bridge_forward_budget);
 }
 #endif
@@ -951,8 +980,8 @@ void MyMesh::handleNeighbourCommand(const char* command, char* reply, bool usb) 
 
 void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32_t timestamp,
                           const uint8_t *app_data, size_t app_data_len) {
-  if (shouldDropAdvert(packet)) {
-    ++_identity_drops;
+  const bool observe = !isShare(packet) && (packet->isRouteDirect() || recv_pkt_region);
+  if (!allowVerifiedAdvert(*packet, observe)) {
     packet->markDoNotRetransmit();
     return;
   }
@@ -1657,6 +1686,11 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     return;
   }
   if (matchCommand(command, "rules", &args)) {
+    const char* device;
+    if (matchCommand(args, "device", &device)) {
+      describeDevice(device, reply);
+      return;
+    }
     const char* recovery_arg;
     if (matchesValue(args, "recovery") || matchesValue(args, "resume") || matchCommand(args, "recover", &recovery_arg)) {
       if (client) strcpy(reply, "Err - use USB for policy recovery");

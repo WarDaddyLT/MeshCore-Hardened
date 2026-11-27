@@ -25,6 +25,7 @@ rules add allow client <64-hex-public-key> [scope]
 rules add deny client <64-hex-public-key> [scope]
 rules add allow repeater <64-hex-public-key> [scope]
 rules add deny repeater <64-hex-public-key> [scope]
+rules device <client|repeater> <64-hex-public-key>
 rules add filter 1byte|data|public on|off [scope]
 rules delete <rule-id-or-prefix>
 rules mode open|restricted
@@ -37,7 +38,15 @@ Scope defaults to `local`. Use `global:<domain>` or `region:<name>` after provis
 
 The store supports 24 total entries, including deletion records. An update is written to the alternate snapshot and read back before the active state changes. It verifies snapshot integrity and rule signatures at boot. Retaining deletion records prevents old copies from restoring deleted rules, so new entries are rejected when the table fills. The last valid snapshot stays available when a write fails.
 
-Deny takes precedence over allow for a verified identity. Forwarding decisions use signed client and repeater advertisements. Traffic addressed to this device can also use the identity matched by its existing MeshCore management authentication. Forwarded legacy traffic without a verifiable sender follows packet-class policy. Restricted mode admits attributable traffic from allowed identities and preserves access for existing management ACL entries unless an explicit deny applies. `rules rate` applies the same per-minute packet count separately to anonymous requests, group text, and group data. A value of `0` disables that cap.
+Deny takes precedence over allow for a verified identity. A deny covers the full key across device roles, including a changed advertised role. An allow applies to its specified role. Traffic addressed to this device can also use the identity matched by its existing MeshCore management authentication. Forwarded legacy traffic without a verifiable sender follows packet-class policy. Restricted mode admits attributable traffic from allowed identities and preserves access for existing management ACL entries unless an explicit deny applies. `rules rate` applies the same per-minute packet count separately to anonymous requests, group text, and group data. A value of `0` disables that cap.
+
+## Device trust and activity
+
+`rules device client <key>` and `rules device repeater <key>` show the effective trust decision and recent signed advert counts for the full key. Add or remove trust through the persistent `rules add allow`, `rules add deny`, and `rules delete` commands. For a deliberate key change, deny the old key and then explicitly allow the replacement. Device trust is independent of the management ACL and policy publication authority.
+
+Activity uses bounded RAM with reserved entries for approved keys. The repeater counts verified client and repeater advertisements received on RF when the signed timestamp is at most 60 seconds behind or 15 seconds ahead of the repeater clock. Within that window, repeated or older timestamps for a tracked key are dropped without increasing its count. Each tracked key can use six increasing timestamps per signed minute. Outside the freshness window or when an unknown key cannot be tracked, normal category controls still apply. Bridge exports use their own category controls.
+
+The counts are advisory. Received activity cannot grant trust or create a ban. Counters reset at reboot, and a valid advert replayed within the freshness window may be observed after that reset. Legacy transit messages have no verifiable sender key for a per-device count. Keep the repeater clock synchronized when inspecting recent activity.
 
 Managed filter rules can add restrictions to the existing filters. The most specific active managed filter wins, in the order local, region, then global. Within a scope, revisions are ordered numerically with the originating key breaking ties. A managed `off` removes the restriction contributed by managed rules. Use the existing `filter` command for the independently persisted base filter.
 

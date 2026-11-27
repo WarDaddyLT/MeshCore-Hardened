@@ -12,7 +12,7 @@ public:
   static constexpr size_t ScopeNameSize = 16;
 
   enum Kind : uint8_t { Allow = 1, Deny, Filter };
-  enum Subject : uint8_t { Client = 1, Repeater, OneByte, Data, Public };
+  enum Subject : uint8_t { AnyDevice, Client, Repeater, OneByte, Data, Public };
   enum Decision : uint8_t { Unknown, Allowed, Denied };
   enum Scope : uint8_t { Local, Region, Global };
 
