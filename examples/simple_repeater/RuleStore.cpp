@@ -195,6 +195,19 @@ bool RuleStore::validRule(const Rule& rule) {
                               : rule.subject == Client || rule.subject == Repeater);
 }
 
+bool RuleStore::makeRoomForRule(Snapshot& snapshot) {
+  if (snapshot.count < Capacity) return true;
+  for (size_t i = 0; i < snapshot.count; ++i) {
+    if (snapshot.rules[i].scope != Local || !snapshot.rules[i].deleted) continue;
+    // LOCAL updates never enter mergeRule, so an expired local tombstone
+    // cannot let an older copy return from a peer.
+    memmove(snapshot.rules + i, snapshot.rules + i + 1, (snapshot.count - i - 1) * sizeof(Rule));
+    snapshot.rules[--snapshot.count] = {};
+    return true;
+  }
+  return false;
+}
+
 bool RuleStore::load(const char* path, Snapshot& snapshot) {
   auto file = openRead(_fs, path);
   if (!file) return false;
@@ -529,9 +542,12 @@ RuleStore::MergeResult RuleStore::mergeRule(Rule& rule, const uint8_t* fingerpri
     }
     break;
   }
-  if (index == Capacity || decodeRevision(_state.revision) == UINT32_MAX) return Rejected;
+  if (decodeRevision(_state.revision) == UINT32_MAX) return Rejected;
   _candidate = _state;
-  if (index == _candidate.count) ++_candidate.count;
+  if (index == _state.count) {
+    if (!makeRoomForRule(_candidate)) return Rejected;
+    index = _candidate.count++;
+  }
   _candidate.rules[index] = rule;
   encodeRevision(_candidate.revision, decodeRevision(_state.revision) + 1);
   return commit() ? Changed : Rejected;
@@ -853,7 +869,7 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     _candidate.unknown_rate[0] = limit & 0xFF;
     _candidate.unknown_rate[1] = limit >> 8;
   } else if (savemesh::matchCommand(command, "add", &arg)) {
-    if (_candidate.count == Capacity) {
+    if (!makeRoomForRule(_candidate)) {
       strcpy(reply, "Err - rule storage full");
       return;
     }
