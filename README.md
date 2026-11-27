@@ -149,10 +149,10 @@ Use **Access control** in the MeshCore USB web configurator or `setperm` over th
 | --- | --- |
 | Guest `0` | Ordinary guest permissions apply. |
 | Read-only `1` | Rule inspection, counters, and sync status. |
-| Read-write `2` | Rule inspection, local rule changes, local mode and rate changes, and explicit sync requests. |
-| Admin `3` | The above plus shared rule writes, neighbour inspection, and room contact inspection or export. |
+| Read-write `2` | Rule inspection, counters, and sync status. |
+| Admin `3` | Rule changes, local mode and rate changes, explicit sync requests, neighbour inspection, and room contact inspection or export. |
 
-Provision sync trust and keys, change notification keys, reset the neighbour table, and enable or rename the room from USB. The existing unauthenticated Ethernet console, where enabled, cannot use the Hardened rules, neighbour, or room commands. Notification channel members have ordinary channel membership. The channel provides no CLI entry point.
+Provision sync trust and keys, change notification keys, reset the neighbour table, and enable or rename the room from USB. Where enabled, the unauthenticated repeater Ethernet console exposes read-only `eth.status`, `ver`, and `board`. Notification channel members have ordinary channel membership. The channel provides no CLI entry point.
 
 ### Add, inspect, and remove rules
 
