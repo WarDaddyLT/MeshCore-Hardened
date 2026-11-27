@@ -7,11 +7,13 @@ from datetime import datetime, timezone
 from glob import glob
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 import struct
 import sys
 import time
+import tempfile
 import uuid
 import xml.etree.ElementTree as ET
 
@@ -345,6 +347,31 @@ def preflight(devices, config):
             raise Skip(f"{role} outbound queue is active. Wait for an isolated, quiet bench.")
 
 
+def pin_keys(path, devices, config):
+    keys = [devices[role].key for role in ROLES]
+    if len(set(keys)) != len(ROLES):
+        raise Skip("The four USB application keys must be distinct.")
+    for role in ROLES:
+        settings = config["roles"][role]
+        key = devices[role].key
+        pinned = settings.get("public_key", "").lower()
+        if pinned and pinned != key:
+            raise Skip(f"{role} key changed. Verify the device before clearing the old pin.")
+        settings["public_key"] = key
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as output:
+            temporary = Path(output.name)
+            json.dump(config, output, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def write_report(path, report):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.with_suffix(".json").write_text(json.dumps(report, indent=2) + "\n")
@@ -370,6 +397,7 @@ def main():
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--list", action="store_true", help="List USB devices without opening ports.")
     actions.add_argument("--identify", action="store_true", help="Display full public keys for local pinning.")
+    actions.add_argument("--pin", action="store_true", help="Pin verified USB identities in the private config.")
     actions.add_argument("--preflight", action="store_true", help="Check bench prerequisites without transmitting.")
     actions.add_argument("--smoke", action="store_true", help="Run the five-advert deny and cleanup scenario.")
     actions.add_argument("--suite", choices=("actor", "acl", "filtering", "security", "sync", "identity"))
@@ -387,10 +415,13 @@ def main():
         return 0
 
     report = {"run_id": uuid.uuid4().hex, "started": datetime.now(timezone.utc).isoformat(),
-              "operation": args.suite or ("preflight" if args.preflight else "identify" if args.identify else "actor"),
+              "operation": args.suite or ("preflight" if args.preflight else "identify" if args.identify
+                                          else "pin" if args.pin else "actor"),
               "devices": {}, "samples": [], "temporary_rules": {}, "cleanup": {}}
     stage = "preflight"
     try:
+        if args.pin and args.config.name != "hil_config.local.json":
+            raise Skip("Pinning requires a private file named hil_config.local.json.")
         if not args.config.is_file():
             raise Skip("Copy hil_config.example.json to your local config and fill in the USB selectors.")
         config = json.loads(args.config.read_text())
@@ -418,6 +449,10 @@ def main():
                 raise Skip("; ".join(failed_identities))
             if args.identify:
                 report.update(status="PASS", reason="Four USB application identities read. RF not run.")
+            elif args.pin:
+                pin_keys(args.config, devices, config)
+                preflight(devices, config)
+                report.update(status="PASS", reason="Four device keys pinned and preflight passed. RF not run.")
             else:
                 preflight(devices, config)
                 if args.preflight:

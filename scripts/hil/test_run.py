@@ -1,6 +1,10 @@
+import json
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
 import unittest
 
-from run import RAW_RX, decode_advert, find_unacknowledged_deny
+from run import RAW_RX, ROLES, Skip, decode_advert, find_unacknowledged_deny, pin_keys
 
 
 class AdvertTest(unittest.TestCase):
@@ -45,6 +49,31 @@ class CleanupTest(unittest.TestCase):
                 }[command]
 
         self.assertEqual(find_unacknowledged_deny(Device(), key, 4), rule_id)
+
+
+class PinTest(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.path = Path(folder.name) / "hil_config.local.json"
+        self.devices = {role: SimpleNamespace(key=f"{i + 1:064x}") for i, role in enumerate(ROLES)}
+        self.config = {"roles": {role: {"serial_number": role, "public_key": ""} for role in ROLES}}
+        self.path.write_text(json.dumps(self.config))
+
+    def test_writes_every_pin_and_keeps_usb_selectors(self):
+        pin_keys(self.path, self.devices, self.config)
+        stored = json.loads(self.path.read_text())
+        for role in ROLES:
+            self.assertEqual(stored["roles"][role]["public_key"], self.devices[role].key)
+            self.assertEqual(stored["roles"][role]["serial_number"], role)
+
+    def test_existing_key_change_leaves_config_unchanged(self):
+        self.config["roles"]["ACTOR"]["public_key"] = "ff" * 32
+        self.path.write_text(json.dumps(self.config))
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(Skip, "ACTOR key changed"):
+            pin_keys(self.path, self.devices, self.config)
+        self.assertEqual(self.path.read_bytes(), before)
 
 
 if __name__ == "__main__":
