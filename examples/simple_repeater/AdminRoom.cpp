@@ -171,6 +171,7 @@ bool MyMesh::receiveAdminRoom(mesh::Packet* packet) {
     auto peer = acl.getClientByIdx(i);
     if (login ? !peer->id.matches(packet->payload + 1) : !peer->id.isHashMatch(packet->payload + 1)) continue;
     if ((peer->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST || shouldDenyClient(peer->id)) continue;
+    if (!_room_work.admit(millis())) return false;
     _room_identity.calcSharedSecret(secret, peer->id);
     length = mesh::Utils::MACThenDecrypt(secret, data, packet->payload + prefix_size,
                                         packet->payload_len - prefix_size);

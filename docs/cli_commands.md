@@ -160,6 +160,8 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ## Logging
 
+MeshCore Hardened repeaters use volatile counters through `rules work` and `rules drops`. They only support `log erase` over USB to remove a file left by older firmware and `log stop` to confirm logging is disabled. The capture commands below apply to stock firmware that supports packet logging.
+
 ### Begin capture of rx log to node storage
 **Usage:** `log start`
 

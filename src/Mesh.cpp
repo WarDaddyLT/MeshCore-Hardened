@@ -40,7 +40,7 @@ int Mesh::searchChannelsByHash(const uint8_t* hash, GroupChannel channels[], int
 
 DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
   if (pkt->isRouteDirect() && pkt->getPayloadType() == PAYLOAD_TYPE_TRACE) {
-    if (pkt->path_len < MAX_PATH_SIZE) {
+    if (pkt->path_len < MAX_PATH_SIZE && pkt->payload_len >= 9) {
       uint8_t i = 0;
       uint32_t trace_tag;
       memcpy(&trace_tag, &pkt->payload[i], 4); i += 4;
@@ -55,7 +55,8 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       uint16_t offset = (uint16_t)pkt->path_len << path_sz;
       if (offset >= len) {   // TRACE has reached end of given path
         onTraceRecv(pkt, trace_tag, auth_code, flags, pkt->path, &pkt->payload[i], len);
-      } else if (self_id.isHashMatch(&pkt->payload[i + offset], 1 << path_sz) && allowPacketForward(pkt) && !_tables->wasSeen(pkt)) {
+      } else if (offset + (1 << path_sz) <= len && self_id.isHashMatch(&pkt->payload[i + offset], 1 << path_sz)
+                 && !_tables->wasSeen(pkt) && allowPacketForward(pkt)) {
         _tables->markSeen(pkt);
         // append SNR (Not hash!)
         pkt->path[pkt->path_len++] = (int8_t) (pkt->getSNR()*4);
@@ -67,7 +68,8 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
     return ACTION_RELEASE;
   }
 
-  if (pkt->isRouteDirect() && pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL && (pkt->payload[0] & 0x80) != 0) {
+  if (pkt->isRouteDirect() && pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL && pkt->payload_len
+      && (pkt->payload[0] & 0x80) != 0) {
     if (pkt->getPathHashCount() == 0) {
       onControlDataRecv(pkt);
     }
@@ -78,35 +80,23 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
   if (pkt->isRouteDirect() && pkt->getPathHashCount() > 0) {
     // check for 'early received' ACK
     if (pkt->getPayloadType() == PAYLOAD_TYPE_ACK) {
-      int i = 0;
       uint32_t ack_crc;
-      memcpy(&ack_crc, &pkt->payload[i], 4); i += 4;
-      if (i <= pkt->payload_len) {
-        onAckRecv(pkt, ack_crc);
-      }
+      if (pkt->payload_len < sizeof(ack_crc)) return ACTION_RELEASE;
+      memcpy(&ack_crc, pkt->payload, sizeof(ack_crc));
+      onAckRecv(pkt, ack_crc);
     }
 
-    if (self_id.isHashMatch(pkt->path, pkt->getPathHashSize()) && allowPacketForward(pkt)) {
-      uint32_t d = getDirectRetransmitDelay(pkt);
-      if (pkt->getPayloadType() == PAYLOAD_TYPE_MULTIPART) {
-        return forwardMultipartDirect(pkt, d);
-      } else if (pkt->getPayloadType() == PAYLOAD_TYPE_ACK) {
-        if (!_tables->wasSeen(pkt)) {  // don't retransmit!
-          _tables->markSeen(pkt);
-          removeSelfFromPath(pkt);
-          routeDirectRecvAcks(pkt, d);
-        }
-        return ACTION_RELEASE;
-      }
-
-      if (!_tables->wasSeen(pkt)) {
-        _tables->markSeen(pkt);
-        removeSelfFromPath(pkt);
-
-        return ACTION_RETRANSMIT_DELAYED(0, d);  // Routed traffic is HIGHEST priority 
-      }
+    if (!self_id.isHashMatch(pkt->path, pkt->getPathHashSize())) return ACTION_RELEASE;
+    if (pkt->getPayloadType() == PAYLOAD_TYPE_MULTIPART) return forwardMultipartDirect(pkt);
+    if (_tables->wasSeen(pkt) || !allowPacketForward(pkt)) return ACTION_RELEASE;
+    _tables->markSeen(pkt);
+    uint32_t delay = getDirectRetransmitDelay(pkt);
+    removeSelfFromPath(pkt);
+    if (pkt->getPayloadType() == PAYLOAD_TYPE_ACK) {
+      routeDirectRecvAcks(pkt, delay);
+      return ACTION_RELEASE;
     }
-    return ACTION_RELEASE;   // this node is NOT the next hop (OR this packet has already been forwarded), so discard.
+    return ACTION_RETRANSMIT_DELAYED(0, delay);  // routed traffic has highest priority
   }
 
   if (pkt->isRouteFlood() && filterRecvFloodPacket(pkt)) return ACTION_RELEASE;
@@ -157,6 +147,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
             uint8_t data[MAX_PACKET_PAYLOAD];
             int len = Utils::MACThenDecrypt(secret, data, macAndData, pkt->payload_len - i);
             if (len > 0) {  // success!
+              found = true;
               if (pkt->getPayloadType() == PAYLOAD_TYPE_PATH) {
                 int k = 0;
                 uint8_t path_len = data[k++];
@@ -167,6 +158,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
                 uint8_t hash_size = (path_len >> 6) + 1;
                 uint8_t hash_count = path_len & 63;
                 uint8_t* path = &data[k]; k += hash_size*hash_count;
+                if (k >= len) break;   // return path must leave a byte for the extra type
                 uint8_t extra_type = data[k++] & 0x0F;   // upper 4 bits reserved for future use
                 uint8_t* extra = &data[k];
                 uint8_t extra_len = len - k;   // remainder of packet (may be padded with zeroes!)
@@ -180,7 +172,6 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
               } else {
                 onPeerDataRecv(pkt, pkt->getPayloadType(), j, secret, data, len);
               }
-              found = true;
               break;
             }
           }
@@ -204,7 +195,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
         MESH_DEBUG_PRINTLN("%s Mesh::onRecvPacket(): incomplete data packet", getLogDateTime());
       } else if (!_tables->wasSeen(pkt)) {
         _tables->markSeen(pkt);
-        if (self_id.isHashMatch(&dest_hash)) {
+        if (self_id.isHashMatch(&dest_hash) && admitAnonDecrypt()) {
           Identity sender(sender_pub_key);
 
           uint8_t secret[PUB_KEY_SIZE];
@@ -250,17 +241,16 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       break;
     }
     case PAYLOAD_TYPE_ADVERT: {
+      if (pkt->payload_len < PUB_KEY_SIZE + sizeof(uint32_t) + SIGNATURE_SIZE) break;
       int i = 0;
       Identity id;
       memcpy(id.pub_key, &pkt->payload[i], PUB_KEY_SIZE); i += PUB_KEY_SIZE;
 
       uint32_t timestamp;
       memcpy(&timestamp, &pkt->payload[i], 4); i += 4;
-      const uint8_t* signature = &pkt->payload[i]; i += SIGNATURE_SIZE;
+      i += SIGNATURE_SIZE;
 
-      if (i > pkt->payload_len) {
-        MESH_DEBUG_PRINTLN("%s Mesh::onRecvPacket(): incomplete advertisement packet", getLogDateTime());
-      } else if (self_id.matches(id.pub_key)) {
+      if (self_id.matches(id.pub_key)) {
         MESH_DEBUG_PRINTLN("%s Mesh::onRecvPacket(): receiving SELF advert packet", getLogDateTime());
       } else if (!_tables->wasSeen(pkt)) {
         _tables->markSeen(pkt);
@@ -268,23 +258,12 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
         int app_data_len = pkt->payload_len - i;
         if (app_data_len > MAX_ADVERT_DATA_SIZE) { app_data_len = MAX_ADVERT_DATA_SIZE; }
 
-        // check that signature is valid
-        bool is_ok;
-        {
-          uint8_t message[PUB_KEY_SIZE + 4 + MAX_ADVERT_DATA_SIZE];
-          int msg_len = 0;
-          memcpy(&message[msg_len], id.pub_key, PUB_KEY_SIZE); msg_len += PUB_KEY_SIZE;
-          memcpy(&message[msg_len], &timestamp, 4); msg_len += 4;
-          memcpy(&message[msg_len], app_data, app_data_len); msg_len += app_data_len;
-
-          is_ok = id.verify(signature, message, msg_len);
-        }
-        if (is_ok) {
+        if (verifyReceivedAdvert(*pkt)) {
           MESH_DEBUG_PRINTLN("%s Mesh::onRecvPacket(): valid advertisement received!", getLogDateTime());
           onAdvertRecv(pkt, id, timestamp, app_data, app_data_len);
           action = routeRecvPacket(pkt);
         } else {
-          MESH_DEBUG_PRINTLN("%s Mesh::onRecvPacket(): received advertisement with forged signature! (app_data_len=%d)", getLogDateTime(), app_data_len);
+          MESH_DEBUG_PRINTLN("%s Mesh::onRecvPacket(): advertisement not verified", getLogDateTime());
         }
       }
       break;
@@ -331,6 +310,18 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
   return action;
 }
 
+bool Mesh::verifyReceivedAdvert(const Packet& packet) {
+  constexpr size_t prefix = PUB_KEY_SIZE + sizeof(uint32_t);
+  constexpr size_t appOffset = prefix + SIGNATURE_SIZE;
+  if (packet.payload_len < appOffset) return false;
+  size_t appSize = packet.payload_len - appOffset;
+  if (appSize > MAX_ADVERT_DATA_SIZE) appSize = MAX_ADVERT_DATA_SIZE;
+  uint8_t message[prefix + MAX_ADVERT_DATA_SIZE];
+  memcpy(message, packet.payload, prefix);
+  memcpy(message + prefix, packet.payload + appOffset, appSize);
+  return Identity(packet.payload).verify(packet.payload + prefix, message, prefix + appSize);
+}
+
 void Mesh::removeSelfFromPath(Packet* pkt) {
   // remove our hash from 'path'
   pkt->setPathHashCount(pkt->getPathHashCount() - 1);  // decrement the count
@@ -356,7 +347,8 @@ DispatcherAction Mesh::routeRecvPacket(Packet* packet) {
   return ACTION_RELEASE;
 }
 
-DispatcherAction Mesh::forwardMultipartDirect(Packet* pkt, uint32_t delay_millis) {
+DispatcherAction Mesh::forwardMultipartDirect(Packet* pkt) {
+  if (pkt->payload_len < 5) return ACTION_RELEASE;
   uint8_t remaining = pkt->payload[0] >> 4;  // num of packets in this multipart sequence still to be sent
   uint8_t type = pkt->payload[0] & 0x0F;
 
@@ -367,7 +359,8 @@ DispatcherAction Mesh::forwardMultipartDirect(Packet* pkt, uint32_t delay_millis
     tmp.payload_len = pkt->payload_len - 1;
     memcpy(tmp.payload, &pkt->payload[1], tmp.payload_len);
 
-    if (!_tables->wasSeen(&tmp)) {   // don't retransmit!
+    if (!_tables->wasSeen(&tmp) && allowPacketForward(pkt)) {
+      uint32_t delay_millis = getDirectRetransmitDelay(pkt);
       _tables->markSeen(&tmp);
       removeSelfFromPath(&tmp);
       routeDirectRecvAcks(&tmp, delay_millis + ((uint32_t)remaining + 1) * 300);  // expect multipart ACKs 300ms apart (x2)

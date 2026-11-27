@@ -33,8 +33,14 @@ bool BridgeBase::validateChecksum(const uint8_t *data, size_t len, uint16_t rece
 
 void BridgeBase::handleReceivedPacket(mesh::Packet *packet) {
   // Guard against uninitialized state
-  if (_initialized == false) {
+  if (!_initialized) {
     BRIDGE_DEBUG_PRINTLN("RX packet received before initialization\n");
+    _mgr->free(packet);
+    return;
+  }
+
+  // Leave room in the shared pool for radio reception and local replies.
+  if (_mgr->getFreeCount() < 3) {
     _mgr->free(packet);
     return;
   }

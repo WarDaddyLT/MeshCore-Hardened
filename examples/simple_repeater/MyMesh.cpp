@@ -382,16 +382,6 @@ mesh::Packet *MyMesh::createSelfAdvert() {
   return createAdvert(self_id, app_data, app_data_len);
 }
 
-File MyMesh::openAppend(const char *fname) {
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  return _fs->open(fname, FILE_O_WRITE);
-#elif defined(RP2040_PLATFORM)
-  return _fs->open(fname, "a");
-#else
-  return _fs->open(fname, "a", true);
-#endif
-}
-
 static uint8_t max_loop_minimal[] =  { 0, /* 1-byte */  4, /* 2-byte */  2, /* 3-byte */  1 };
 static uint8_t max_loop_moderate[] = { 0, /* 1-byte */  2, /* 2-byte */  1, /* 3-byte */  1 };
 static uint8_t max_loop_strict[] =   { 0, /* 1-byte */  1, /* 2-byte */  1, /* 3-byte */  1 };
@@ -458,9 +448,12 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
     ++_filter_drops;
     return false;
   }
-  if (packet->isRouteDirect() && shouldDropAdvert(packet, false)) {
-    ++_identity_drops;
-    return false;
+  if (packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
+    if (!verifyReceivedAdvert(*packet)) return false;
+    if (shouldDropAdvert(packet)) {
+      ++_identity_drops;
+      return false;
+    }
   }
   return !shouldDropByRate(packet, _radio_forward_budget);
 }
@@ -510,7 +503,41 @@ bool MyMesh::shouldDropByRate(const mesh::Packet* packet, forward_traffic::Budge
   return true;
 }
 
-bool MyMesh::shouldDropAdvert(const mesh::Packet* packet, bool signature_verified) const {
+bool MyMesh::admitReceivedPacket(const mesh::Packet* packet) {
+  if (receive_work::validFrame(*packet)) return true;
+  ++_frame_drops;
+  return false;
+}
+
+bool MyMesh::admitDelayedPacket() {
+  if (_mgr->getFreeCount() >= forward_traffic::ReservedFreePackets) return true;
+  ++_delayed_drops;
+  return false;
+}
+
+bool MyMesh::verifyReceivedAdvert(const mesh::Packet& packet) {
+  uint8_t digest[sizeof(AdvertCheck::digest)];
+  mesh::Utils::sha256(digest, sizeof(digest), packet.payload, packet.payload_len);
+  for (unsigned i = 0; i < _advert_checks_used; ++i) {
+    const auto& check = _advert_checks[i];
+    if (memcmp(check.digest, digest, sizeof(digest)) == 0) {
+      ++_cached_adverts;
+      return check.verified;
+    }
+  }
+  if (!_advert_work.admit(millis())) return false;
+  bool verified = mesh::Mesh::verifyReceivedAdvert(packet);
+  if (!verified) ++_invalid_adverts;
+  auto& entry = _advert_checks[_next_advert_check];
+  memcpy(entry.digest, digest, sizeof(digest));
+  entry.verified = verified;
+  constexpr unsigned capacity = sizeof(_advert_checks) / sizeof(_advert_checks[0]);
+  if (_advert_checks_used < capacity) ++_advert_checks_used;
+  _next_advert_check = (_next_advert_check + 1) % capacity;
+  return verified;
+}
+
+bool MyMesh::shouldDropAdvert(const mesh::Packet* packet) const {
   constexpr size_t SignedPrefixSize = PUB_KEY_SIZE + sizeof(uint32_t);
   constexpr size_t AdvertPrefixSize = SignedPrefixSize + SIGNATURE_SIZE;
   if (packet->getPayloadType() != PAYLOAD_TYPE_ADVERT) return false;
@@ -527,16 +554,7 @@ bool MyMesh::shouldDropAdvert(const mesh::Packet* packet, bool signature_verifie
   else return false;
 
   auto decision = _rules.decide(subject, packet->payload);
-  if (decision != RuleStore::Denied && (decision != RuleStore::Unknown || !_rules.restricted())) return false;
-  if (signature_verified) return true;
-
-  // Mesh dispatch verifies flood adverts before onAdvertRecv. Routed direct
-  // traffic and bridge exports can reach their forwarding gate earlier.
-  uint8_t message[SignedPrefixSize + MAX_ADVERT_DATA_SIZE];
-  memcpy(message, packet->payload, SignedPrefixSize);
-  memcpy(message + SignedPrefixSize, app_data, app_len);
-  mesh::Identity id(packet->payload);
-  return id.verify(packet->payload + SignedPrefixSize, message, SignedPrefixSize + app_len);
+  return decision == RuleStore::Denied || (decision == RuleStore::Unknown && _rules.restricted());
 }
 
 bool MyMesh::shouldDenyClient(const mesh::Identity& id) {
@@ -565,69 +583,37 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #endif
 }
 
-void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #ifdef WITH_BRIDGE
-  if (_rules.forwardingAllowed() && _prefs.bridge_pkt_src == 1 && !shouldDropByFilter(pkt) && !shouldDropAdvert(pkt, false)
-      && !shouldDropByRate(pkt, _bridge_forward_budget)) {
-    bridge.sendPacket(pkt);
+bool MyMesh::shouldExportToBridge(mesh::Packet* packet) {
+  if (_prefs.disable_fwd || !_rules.forwardingAllowed() || !admitReceivedPacket(packet)
+      || shouldDropByFilter(packet)) return false;
+  if (packet->isRouteFlood()) {
+    if (mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max, _prefs.flood_max_unscoped,
+                                    _prefs.flood_max_advert)) return false;
+    if (packet->hasTransportCodes()) {
+      if (!region_map.findMatch(packet, REGION_DENY_FLOOD)) return false;
+    } else if (region_map.getWildcard().flags & REGION_DENY_FLOOD) {
+      return false;
+    }
   }
+  if (packet->getPayloadType() == PAYLOAD_TYPE_CONTROL && packet->payload_len == PolicyPayloadSize
+      && packet->payload[0] == PolicyType) return false;
+  if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
+      && (!verifyReceivedAdvert(*packet) || shouldDropAdvert(packet))) return false;
+  return !shouldDropByRate(packet, _bridge_forward_budget);
+}
 #endif
 
-  if (_logging) {
-    File f = openAppend(PACKET_LOG_FILE);
-    if (f) {
-      f.print(getLogDateTime());
-      f.printf(": RX, len=%d (type=%d, route=%s, payload_len=%d) SNR=%d RSSI=%d score=%d", len,
-               pkt->getPayloadType(), pkt->isRouteDirect() ? "D" : "F", pkt->payload_len,
-               (int)_radio->getLastSNR(), (int)_radio->getLastRSSI(), (int)(score * 1000));
-
-      if (pkt->getPayloadType() == PAYLOAD_TYPE_PATH || pkt->getPayloadType() == PAYLOAD_TYPE_REQ ||
-          pkt->getPayloadType() == PAYLOAD_TYPE_RESPONSE || pkt->getPayloadType() == PAYLOAD_TYPE_TXT_MSG) {
-        f.printf(" [%02X -> %02X]\n", (uint32_t)pkt->payload[1], (uint32_t)pkt->payload[0]);
-      } else {
-        f.printf("\n");
-      }
-      f.close();
-    }
-  }
-}
-
-void MyMesh::logTx(mesh::Packet *pkt, int len) {
+void MyMesh::logRx(mesh::Packet* packet, int, float) {
 #ifdef WITH_BRIDGE
-  if (_rules.forwardingAllowed() && _prefs.bridge_pkt_src == 0 && !shouldDropByFilter(pkt) && !shouldDropAdvert(pkt, false)
-      && !shouldDropByRate(pkt, _bridge_forward_budget)) {
-    bridge.sendPacket(pkt);
-  }
+  if (_prefs.bridge_pkt_src == 1 && shouldExportToBridge(packet)) bridge.sendPacket(packet);
 #endif
-
-  if (_logging) {
-    File f = openAppend(PACKET_LOG_FILE);
-    if (f) {
-      f.print(getLogDateTime());
-      f.printf(": TX, len=%d (type=%d, route=%s, payload_len=%d)", len, pkt->getPayloadType(),
-               pkt->isRouteDirect() ? "D" : "F", pkt->payload_len);
-
-      if (pkt->getPayloadType() == PAYLOAD_TYPE_PATH || pkt->getPayloadType() == PAYLOAD_TYPE_REQ ||
-          pkt->getPayloadType() == PAYLOAD_TYPE_RESPONSE || pkt->getPayloadType() == PAYLOAD_TYPE_TXT_MSG) {
-        f.printf(" [%02X -> %02X]\n", (uint32_t)pkt->payload[1], (uint32_t)pkt->payload[0]);
-      } else {
-        f.printf("\n");
-      }
-      f.close();
-    }
-  }
 }
 
-void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
-  if (_logging) {
-    File f = openAppend(PACKET_LOG_FILE);
-    if (f) {
-      f.print(getLogDateTime());
-      f.printf(": TX FAIL!, len=%d (type=%d, route=%s, payload_len=%d)\n", len, pkt->getPayloadType(),
-               pkt->isRouteDirect() ? "D" : "F", pkt->payload_len);
-      f.close();
-    }
-  }
+void MyMesh::logTx(mesh::Packet* packet, int) {
+#ifdef WITH_BRIDGE
+  if (_prefs.bridge_pkt_src == 0 && shouldExportToBridge(packet)) bridge.sendPacket(packet);
+#endif
 }
 
 int MyMesh::calcRxDelay(float score, uint32_t air_time) const {
@@ -645,6 +631,7 @@ uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
 }
 
 mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
+  if (!pkt->received_over_radio && !admitReceivedPacket(pkt)) return ACTION_RELEASE;
   if (pkt->getRouteType() == ROUTE_TYPE_TRANSPORT_FLOOD) {
     recv_pkt_region = region_map.findMatch(pkt, REGION_DENY_FLOOD);
   } else if (pkt->getRouteType() == ROUTE_TYPE_FLOOD) {
@@ -669,6 +656,7 @@ mesh::DispatcherAction MyMesh::receivePolicyUpdate(mesh::Packet* packet) {
       || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)
       || getTables()->wasSeen(packet)) return ACTION_RELEASE;
   if (_next_policy_commit && !millisHasNowPassed(_next_policy_commit)) return ACTION_RELEASE;
+  if (!_sync_work.admit(millis())) return ACTION_RELEASE;
 
   GCM<AES128> cipher;
   if (!cipher.setKey(_rules.syncKey(), CIPHER_KEY_SIZE) || !cipher.setIV(packet->payload + 1, PolicyNonceSize)) {
@@ -963,7 +951,7 @@ void MyMesh::handleNeighbourCommand(const char* command, char* reply, bool usb) 
 
 void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32_t timestamp,
                           const uint8_t *app_data, size_t app_data_len) {
-  if (shouldDropAdvert(packet, true)) {
+  if (shouldDropAdvert(packet)) {
     ++_identity_drops;
     packet->markDoNotRetransmit();
     return;
@@ -1221,7 +1209,6 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   uptime_millis = 0;
   next_local_advert = next_flood_advert = 0;
   set_radio_at = revert_radio_at = 0;
-  _logging = false;
   region_load_active = false;
   recv_pkt_region = NULL;
 
@@ -1402,22 +1389,6 @@ void MyMesh::updateFloodAdvertTimer() {
     next_flood_advert = futureMillis(((uint32_t)_prefs.flood_advert_interval) * 60 * 60 * 1000);
   } else {
     next_flood_advert = 0; // stop the timer
-  }
-}
-
-void MyMesh::dumpLogFile() {
-#if defined(RP2040_PLATFORM)
-  File f = _fs->open(PACKET_LOG_FILE, "r");
-#else
-  File f = _fs->open(PACKET_LOG_FILE);
-#endif
-  if (f) {
-    while (f.available()) {
-      int c = f.read();
-      if (c < 0) break;
-      Serial.print((char)c);
-    }
-    f.close();
   }
 }
 
@@ -1692,6 +1663,27 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       else _rules.handleRecoveryCommand(args, reply);
       return;
     }
+    const char* work;
+    if (matchCommand(args, "work", &work)) {
+      if (!*work) {
+        snprintf(reply, 150, "frame=%lu delayed=%lu invalid-advert=%lu cached-advert=%lu",
+                 static_cast<unsigned long>(_frame_drops), static_cast<unsigned long>(_delayed_drops),
+                 static_cast<unsigned long>(_invalid_adverts), static_cast<unsigned long>(_cached_adverts));
+      } else {
+        const receive_work::Budget* budget = nullptr;
+        if (matchesValue(work, "advert")) budget = &_advert_work;
+        else if (matchesValue(work, "anonymous")) budget = &_anonymous_work;
+        else if (matchesValue(work, "sync")) budget = &_sync_work;
+        else if (matchesValue(work, "room")) budget = &_room_work;
+        if (budget) {
+          snprintf(reply, 150, "attempts=%lu dropped=%lu", static_cast<unsigned long>(budget->attempts),
+                   static_cast<unsigned long>(budget->drops));
+        } else {
+          strcpy(reply, "Err - use rules work [advert|anonymous|sync|room]");
+        }
+      }
+      return;
+    }
     const char* category;
     if (matchCommand(args, "drops", &category)) {
       if (!*category) {
@@ -1728,6 +1720,18 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
   if (client && !client->isAdmin()) {
     strcpy(reply, "Err - admin permission required");
+    return;
+  }
+
+  if (matchCommand(command, "log", &args)) {
+    if (matchesValue(args, "erase") && !client) {
+      eraseLogFile();
+      strcpy(reply, _fs->exists(PACKET_LOG_FILE) ? "Err - legacy log could not be erased" : "OK - no legacy log");
+    } else if (matchesValue(args, "stop")) {
+      strcpy(reply, "OK - packet logging disabled");
+    } else {
+      strcpy(reply, "Err - packet logging disabled; use rules work");
+    }
     return;
   }
 

@@ -361,7 +361,7 @@ Use the cursor in the actual reply when paging. The adapter keeps up to eight in
 | Peer does not receive a rule | Check the sync key, domain, region flood configuration, origin trust, and rule scope. Start `rules sync` and allow time for queued updates. Inspect state on the receiving peer. |
 | Room does not answer | Verify the secondary contact, ACL membership, enabled setting, and session login. The normal USB and primary remote CLI remain the supported administration paths. |
 
-The Hardened rule store is limited to policy and configuration. The inherited stock packet metadata logger is separate. Use `log stop` to disable it after a diagnostic session. [Additional CLI reference](docs/hardened-repeater-cli.md)
+Use `rules work`, `rules drops`, and the stock USB statistics commands for diagnostics. The repeater no longer creates a packet log on flash. Existing legacy logs can be erased with `log erase` over USB. [Additional CLI reference](docs/hardened-repeater-cli.md)
 
 ## Build and release
 

@@ -77,6 +77,16 @@ Forwarding admission limits each category to four outstanding packets in the out
 
 Valid v5 and v6 rule snapshots load with the default airtime share. A v5 snapshot also defaults its type and category packet policies to allow. The next policy write uses v7. Back up policy before installing an older build that lacks this snapshot format.
 
+## Receive work and diagnostics
+
+The repeater checks the packet envelope and supported payload lengths before processing RF packets. Direct transit duplicates are checked before forwarding policy. Signature verification for signed adverts has a bounded cache of recent results and its own work limit. Failed signature checks never create identity bans. Anonymous requests addressed to the primary identity, policy sync, and the optional room each have independent limits for expensive receive work. Delayed RF packets and bridge input leave three buffers free for other operations.
+
+Use `rules work` to read aggregate volatile counters for malformed frames, RF delay-queue drops, invalid advert signatures, and advert verification cache hits. Use `rules work advert`, `rules work anonymous`, `rules work sync`, or `rules work room` to read admitted verification attempts and work-limit drops. These counters reset at reboot. Compare them with `rules drops` and `stats-radio` when measuring responsiveness.
+
+Bridge exports observe forwarding enablement, flood scope and hop limits, and the existing packet policies. An exported advertisement must have a valid signature. Policy-sync packets stay on the RF sync path. Optional room and neighbour notices still require separate stock-client and airtime validation.
+
+The repeater stores no packet journal. `log stop` reports that logging is disabled. A file left by older firmware can be removed explicitly with `log erase` over USB.
+
 ## Policy storage recovery
 
 The repeater checks each committed policy snapshot and its revision record at boot. If the expected policy is missing or corrupt, RF forwarding and bridge exports stop. The USB CLI and enrolled local management remain available.

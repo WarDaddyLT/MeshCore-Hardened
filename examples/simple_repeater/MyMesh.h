@@ -41,6 +41,7 @@
 #include "ChannelMatch.h"
 #include "ForwardFilter.h"
 #include "RepeaterPrefsPolicy.h"
+#include "ReceiveWork.h"
 #include "CliParse.h"
 
 #ifdef WITH_BRIDGE
@@ -89,13 +90,27 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint32_t last_millis;
   uint64_t uptime_millis;
   unsigned long next_local_advert, next_flood_advert;
-  bool _logging;
   NodePrefs _prefs;
   FilterPrefs _filter_prefs;
   RuleStore _rules;
   uint32_t _filter_drops = 0;
   uint32_t _identity_drops = 0;
   uint32_t _rate_drops = 0;
+  uint32_t _frame_drops = 0;
+  uint32_t _delayed_drops = 0;
+  uint32_t _invalid_adverts = 0;
+  uint32_t _cached_adverts = 0;
+  receive_work::Budget _advert_work{250, 4};
+  receive_work::Budget _anonymous_work{500, 4};
+  receive_work::Budget _sync_work{500, 2};
+  receive_work::Budget _room_work{500, 2};
+  struct AdvertCheck {
+    uint8_t digest[16];
+    bool verified;
+  };
+  AdvertCheck _advert_checks[8];
+  unsigned _advert_checks_used = 0;
+  unsigned _next_advert_check = 0;
   struct ForwardingStats {
     uint32_t airtimeDrops = 0;
     uint32_t queueDrops = 0;
@@ -169,7 +184,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool repairRepeaterPrefs();
   bool shouldDropByFilter(const mesh::Packet* packet) const;
   bool shouldDropByRate(const mesh::Packet* packet, forward_traffic::Budget& budget);
-  bool shouldDropAdvert(const mesh::Packet* packet, bool signature_verified) const;
+  bool shouldDropAdvert(const mesh::Packet* packet) const;
+#ifdef WITH_BRIDGE
+  bool shouldExportToBridge(mesh::Packet* packet);
+#endif
   bool shouldDenyClient(const mesh::Identity& id);
   bool neighbourChannelUsable() const;
   void noteDirectNeighbour(const mesh::Identity& id, bool repeater);
@@ -194,7 +212,6 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
   mesh::Packet* createSelfAdvert();
 
-  File openAppend(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
 
 protected:
@@ -203,13 +220,17 @@ protected:
   }
 
   bool allowPacketForward(const mesh::Packet* packet) override;
+  bool admitReceivedPacket(const mesh::Packet* packet) override;
+  bool admitDelayedPacket() override;
+  void onMalformedPacket() override { ++_frame_drops; }
+  bool verifyReceivedAdvert(const mesh::Packet& packet) override;
+  bool admitAnonDecrypt() override { return _anonymous_work.admit(millis()); }
   bool admitForwardedPacket(const mesh::Packet* packet) override;
   const char* getLogDateTime() override;
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
 
   void logRx(mesh::Packet* pkt, int len, float score) override;
   void logTx(mesh::Packet* pkt, int len) override;
-  void logTxFail(mesh::Packet* pkt, int len) override;
   int calcRxDelay(float score, uint32_t air_time) const override;
 
   uint32_t getRetransmitDelay(const mesh::Packet* packet) override;
@@ -275,13 +296,13 @@ public:
   void updateAdvertTimer() override;
   void updateFloodAdvertTimer() override;
 
-  void setLoggingOn(bool enable) override { _logging = enable; }
+  void setLoggingOn(bool) override {}
 
   void eraseLogFile() override {
     _fs->remove(PACKET_LOG_FILE);
   }
 
-  void dumpLogFile() override;
+  void dumpLogFile() override {}
   void setTxPower(int8_t power_dbm) override;
   void formatNeighborsReply(char *reply) override;
   void removeNeighbor(const uint8_t* pubkey, int key_len) override;
