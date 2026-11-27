@@ -4,6 +4,11 @@
 
 namespace {
 const char* const Files[] = {"/hardened_rules_a", "/hardened_rules_b"};
+const char* const Seals[] = {"/hardened_rules_a_rev", "/hardened_rules_b_rev"};
+constexpr const char* Pending = "/hardened_rules_tmp";
+constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
+constexpr const char* Provisioned = "/hardened_rules_provisioned";
+constexpr const char* ForwardingHold = "/hardened_rules_hold";
 constexpr uint8_t Magic[] = {'M', 'C', 'H', 5};
 constexpr char SigningDomain[] = "MeshCore Hardened policy v1";
 constexpr size_t SignedSize = sizeof(SigningDomain) + RuleStore::ScopeNameSize * 2
@@ -20,6 +25,60 @@ void encodeRevision(uint8_t* bytes, uint32_t value) {
   for (size_t i = 0; i < 4; i++) {
     bytes[i] = static_cast<uint8_t>(value >> (i * 8));
   }
+}
+
+File openRead(FILESYSTEM* fs, const char* path) {
+#if defined(RP2040_PLATFORM)
+  return fs->open(path, "r");
+#else
+  return fs->open(path);
+#endif
+}
+
+File openWrite(FILESYSTEM* fs, const char* path) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  return fs->open(path, FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+  return fs->open(path, "w");
+#else
+  return fs->open(path, "w", true);
+#endif
+}
+
+bool ensureMarker(FILESYSTEM* fs, const char* path) {
+  if (fs->exists(path)) return true;
+  auto file = openWrite(fs, path);
+  if (!file) return false;
+  const uint8_t marker = 1;
+  bool written = file.write(&marker, sizeof(marker)) == sizeof(marker);
+  file.close();
+  return written && fs->exists(path);
+}
+
+bool removeIfPresent(FILESYSTEM* fs, const char* path) {
+  return !fs->exists(path) || fs->remove(path);
+}
+
+bool verifySeal(FILESYSTEM* fs, const char* path, uint32_t revision) {
+  auto file = openRead(fs, path);
+  if (!file) return false;
+  uint8_t stored[4];
+  bool valid = file.size() == sizeof(stored)
+      && file.read(stored, sizeof(stored)) == sizeof(stored)
+      && decodeRevision(stored) == revision;
+  file.close();
+  return valid;
+}
+
+bool commitSeal(FILESYSTEM* fs, const char* path, uint32_t revision) {
+  if (!removeIfPresent(fs, PendingSeal)) return false;
+  auto file = openWrite(fs, PendingSeal);
+  if (!file) return false;
+  uint8_t encoded[4];
+  encodeRevision(encoded, revision);
+  bool written = file.write(encoded, sizeof(encoded)) == sizeof(encoded);
+  file.close();
+  return written && verifySeal(fs, PendingSeal, revision) && fs->rename(PendingSeal, path);
 }
 
 int hexValue(char c) {
@@ -78,12 +137,8 @@ bool RuleStore::validRule(const Rule& rule) {
                               : rule.subject == Client || rule.subject == Repeater);
 }
 
-bool RuleStore::load(int slot, Snapshot& snapshot) {
-#if defined(RP2040_PLATFORM)
-  auto file = _fs->open(Files[slot], "r");
-#else
-  auto file = _fs->open(Files[slot]);
-#endif
+bool RuleStore::load(const char* path, Snapshot& snapshot) {
+  auto file = openRead(_fs, path);
   if (!file) return false;
   bool ok = file.size() == sizeof(snapshot)
          && file.read(reinterpret_cast<uint8_t*>(&snapshot), sizeof(snapshot)) == sizeof(snapshot);
@@ -119,43 +174,122 @@ bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
 
 void RuleStore::begin(FILESYSTEM* fs, const mesh::LocalIdentity& node) {
   _fs = fs;
+  _forwarding_hold = fs->exists(ForwardingHold);
+  bool managed = fs->exists(Provisioned) || fs->exists(Seals[0]) || fs->exists(Seals[1]);
+  uint32_t legacy_revisions[2]{};
   for (int slot = 0; slot < 2; slot++) {
-    if (load(slot, _candidate) && validate(_candidate, node)
-        && (_active_slot < 0 || decodeRevision(_candidate.revision) > decodeRevision(_state.revision))) {
+    if (!fs->exists(Files[slot]) && !fs->exists(Seals[slot])) continue;
+    if (!load(Files[slot], _candidate) || !validate(_candidate, node)) {
+      _invalid_slots |= 1 << slot;
+      continue;
+    }
+    uint32_t revision = decodeRevision(_candidate.revision);
+    if (!revision || (managed && !verifySeal(fs, Seals[slot], revision))) {
+      _invalid_slots |= 1 << slot;
+      continue;
+    }
+    legacy_revisions[slot] = revision;
+    if (_active_slot < 0 || revision > decodeRevision(_state.revision)) {
       _state = _candidate;
       _active_slot = slot;
     }
   }
-  _ready = _active_slot >= 0 || (!fs->exists(Files[0]) && !fs->exists(Files[1]));
+  if (!_invalid_slots && _active_slot >= 0) {
+    _ready = managed || ensureMarker(fs, Provisioned);
+    if (!managed) {
+      for (int slot = 0; slot < 2 && _ready; ++slot) {
+        if (legacy_revisions[slot] && !commitSeal(fs, Seals[slot], legacy_revisions[slot])) {
+          _invalid_slots |= 1 << slot;
+          _ready = false;
+        }
+      }
+    }
+  } else {
+    _ready = !_invalid_slots && !managed && !_forwarding_hold;
+  }
   memcpy(_state.magic, Magic, sizeof(Magic));
+}
+
+bool RuleStore::verifyCandidate(const char* path, const uint8_t* digest) {
+  if (!load(path, _candidate) || memcmp(_candidate.digest, digest, sizeof(_candidate.digest)) != 0) return false;
+  uint8_t read_digest[sizeof(_candidate.digest)];
+  mesh::Utils::sha256(read_digest, sizeof(read_digest), reinterpret_cast<const uint8_t*>(&_candidate),
+                      offsetof(Snapshot, digest));
+  return memcmp(read_digest, digest, sizeof(read_digest)) == 0;
 }
 
 bool RuleStore::commit() {
   int slot = _active_slot == 0 ? 1 : 0;
   mesh::Utils::sha256(_candidate.digest, sizeof(_candidate.digest),
-                     reinterpret_cast<const uint8_t*>(&_candidate), offsetof(Snapshot, digest));
+                      reinterpret_cast<const uint8_t*>(&_candidate), offsetof(Snapshot, digest));
   uint8_t digest[sizeof(_candidate.digest)];
   memcpy(digest, _candidate.digest, sizeof(digest));
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  if (_fs->exists(Files[slot]) && !_fs->remove(Files[slot])) return false;
-  auto file = _fs->open(Files[slot], FILE_O_WRITE);
-#elif defined(RP2040_PLATFORM)
-  auto file = _fs->open(Files[slot], "w");
-#else
-  auto file = _fs->open(Files[slot], "w", true);
-#endif
+  if (!removeIfPresent(_fs, Pending)) return false;
+  auto file = openWrite(_fs, Pending);
   if (!file) return false;
   bool written = file.write(reinterpret_cast<const uint8_t*>(&_candidate), sizeof(_candidate))
               == sizeof(_candidate);
   file.close();
-  if (!written || !load(slot, _candidate) || memcmp(digest, _candidate.digest, sizeof(digest)) != 0) return false;
-  uint8_t read_digest[sizeof(digest)];
-  mesh::Utils::sha256(read_digest, sizeof(read_digest), reinterpret_cast<const uint8_t*>(&_candidate),
-                     offsetof(Snapshot, digest));
-  if (memcmp(read_digest, digest, sizeof(digest)) != 0) return false;
+  if (!written || !verifyCandidate(Pending, digest) || !ensureMarker(_fs, Provisioned)) return false;
+  if (!removeIfPresent(_fs, Seals[slot]) || !removeIfPresent(_fs, Files[slot])
+      || !_fs->rename(Pending, Files[slot]) || !verifyCandidate(Files[slot], digest)
+      || !commitSeal(_fs, Seals[slot], decodeRevision(_candidate.revision))) return false;
+
   _state = _candidate;
   _active_slot = slot;
+  _invalid_slots &= ~(1 << slot);
   return true;
+}
+
+void RuleStore::handleRecoveryCommand(const char* command, char* reply) {
+  const char* arg;
+  if (savemesh::matchesValue(command, "recovery")) {
+    snprintf(reply, 150, "storage=%s forwarding=%s last=%lu", _ready ? "ready" : "recovery",
+             forwardingAllowed() ? "available" : "held",
+             static_cast<unsigned long>(decodeRevision(_state.revision)));
+  } else if (savemesh::matchesValue(command, "resume")) {
+    if (!_ready || !_forwarding_hold || !_fs->remove(ForwardingHold)) {
+      strcpy(reply, "Err - no recoverable forwarding hold");
+      return;
+    }
+    _forwarding_hold = false;
+    strcpy(reply, "OK");
+  } else if (savemesh::matchCommand(command, "recover", &arg)) {
+    if (_ready) {
+      strcpy(reply, "Err - policy storage is ready");
+      return;
+    }
+    bool empty = savemesh::matchesValue(arg, "empty");
+    uint32_t revision = decodeRevision(_state.revision);
+    char expected[11];
+    snprintf(expected, sizeof(expected), "%lu", static_cast<unsigned long>(revision));
+    if (!empty && (_active_slot < 0 || !savemesh::matchesValue(arg, expected))) {
+      strcpy(reply, "Err - confirm with rules recover <last-revision> or rules recover empty");
+      return;
+    }
+    if (revision == UINT32_MAX || !ensureMarker(_fs, ForwardingHold)) {
+      strcpy(reply, "Err - unable to hold forwarding");
+      return;
+    }
+    _forwarding_hold = true;
+
+    _candidate = empty ? Snapshot{} : _state;
+    memcpy(_candidate.magic, Magic, sizeof(Magic));
+    encodeRevision(_candidate.revision, revision + 1);
+    if (!commit()) {
+      strcpy(reply, "Err - policy recovery write failed");
+      return;
+    }
+    int other_slot = 1 - _active_slot;
+    if ((_invalid_slots & (1 << other_slot))
+        && (!removeIfPresent(_fs, Seals[other_slot]) || !removeIfPresent(_fs, Files[other_slot]))) {
+      strcpy(reply, "Err - corrupt policy slot could not be cleared");
+      return;
+    }
+    _invalid_slots = 0;
+    _ready = true;
+    strcpy(reply, "OK - review policy before rules resume");
+  }
 }
 
 bool RuleStore::setNeighbourChannel(const uint8_t* key) {
@@ -392,7 +526,7 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
                               const mesh::Identity* issuer, uint32_t timestamp, mesh::RNG& rng,
                               bool can_write, bool can_publish, bool& sync_requested) {
   if (!_ready) {
-    strcpy(reply, "Err - rule storage unavailable");
+    strcpy(reply, "Err - rule storage unavailable; use rules recovery over USB");
     return;
   }
   unsigned active = 0;

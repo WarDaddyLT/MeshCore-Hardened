@@ -40,6 +40,16 @@ Deny takes precedence over allow for a verified identity. Forwarding decisions u
 
 Managed filter rules can add restrictions to the existing filters. The most specific active managed filter wins, in the order local, region, then global. Within a scope, revisions are ordered numerically with the originating key breaking ties. A managed `off` removes the restriction contributed by managed rules. Use the existing `filter` command for the independently persisted base filter.
 
+## Policy storage recovery
+
+The repeater checks each committed policy snapshot and its revision record at boot. If the expected policy is missing or corrupt, RF forwarding and bridge exports stop. The USB CLI and enrolled local management remain available.
+
+1. Run `rules recovery` over USB to see the storage status and last readable revision.
+2. Use `rules recover <last-revision>` to restore the last readable policy explicitly. If no snapshot can be used, `rules recover empty` initializes an empty managed policy. This clears managed rules, policy sync settings, and secondary room settings. The primary identity, administrator ACL, and base filters are stored separately.
+3. Review or reprovision the policy, then run `rules resume` over USB. The hold survives reboot and stays in effect until resume succeeds.
+
+Valid snapshots from older builds are recorded on upgrade. Interrupted writes preserve the previous sealed snapshot. If the boot checks cannot establish which policy is safe to use, forwarding stays held and the repeater reports recovery is required.
+
 ## Private direct-neighbour notices
 
 ```text
