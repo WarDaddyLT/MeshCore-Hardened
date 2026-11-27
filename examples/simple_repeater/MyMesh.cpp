@@ -108,7 +108,7 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
         && strncmp(password, _prefs.password, sizeof(_prefs.password)) == 0;
     if (admin_password_matches) {
       if (!client || !client->isAdmin()) {
-        if (!_rules.isReady() || _rules.restricted() || acl.needsRecovery()) return 0;
+        if (!_rules.forwardingAllowed() || _rules.restricted() || acl.needsRecovery()) return 0;
         uint8_t permissions = client ? client->permissions & ~PERM_ACL_ROLE_MASK : 0;
         permissions |= PERM_ACL_ADMIN;
         if (!acl.updatePermissions(self_id, sender.pub_key, PUB_KEY_SIZE, permissions)) return 0;
@@ -431,7 +431,7 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
-  if (_prefs.disable_fwd) return false;
+  if (_prefs.disable_fwd || !_rules.forwardingAllowed()) return false;
   if (packet->isRouteFlood()
       && mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max, _prefs.flood_max_unscoped, _prefs.flood_max_advert)) {
     return false;
@@ -546,7 +546,7 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #ifdef WITH_BRIDGE
-  if (_prefs.bridge_pkt_src == 1 && !shouldDropByFilter(pkt) && !shouldDropAdvert(pkt, false)
+  if (_rules.forwardingAllowed() && _prefs.bridge_pkt_src == 1 && !shouldDropByFilter(pkt) && !shouldDropAdvert(pkt, false)
       && !shouldDropByRate(pkt, _bridge_forward_budget)) {
     bridge.sendPacket(pkt);
   }
@@ -573,7 +573,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #ifdef WITH_BRIDGE
-  if (_prefs.bridge_pkt_src == 0 && !shouldDropByFilter(pkt) && !shouldDropAdvert(pkt, false)
+  if (_rules.forwardingAllowed() && _prefs.bridge_pkt_src == 0 && !shouldDropByFilter(pkt) && !shouldDropAdvert(pkt, false)
       && !shouldDropByRate(pkt, _bridge_forward_budget)) {
     bridge.sendPacket(pkt);
   }
@@ -670,6 +670,7 @@ mesh::DispatcherAction MyMesh::receivePolicyUpdate(mesh::Packet* packet) {
 }
 
 void MyMesh::sendPolicyUpdate() {
+  if (!_rules.forwardingAllowed()) return;
   if (_sync_cursor >= RuleStore::Capacity || _mgr->getOutboundTotal() != 0
       || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)
       || (_next_policy_tx && !millisHasNowPassed(_next_policy_tx))) return;
@@ -849,6 +850,7 @@ void MyMesh::noteDirectNeighbour(const mesh::Identity& id, bool repeater) {
 }
 
 void MyMesh::sendNeighbourNotice() {
+  if (!_rules.forwardingAllowed()) return;
   if (_next_notice && !millisHasNowPassed(_next_notice)) return;
   if (_mgr->getOutboundTotal() != 0) return;
   for (size_t i = 0; i < _notice_count; i++) {
@@ -1660,6 +1662,12 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     return;
   }
   if (matchCommand(command, "rules", &args)) {
+    const char* recovery_arg;
+    if (matchesValue(args, "recovery") || matchesValue(args, "resume") || matchCommand(args, "recover", &recovery_arg)) {
+      if (client) strcpy(reply, "Err - use USB for policy recovery");
+      else _rules.handleRecoveryCommand(args, reply);
+      return;
+    }
     if (matchesValue(args, "drops")) {
       snprintf(reply, 150, "filter=%lu identity=%lu rate=%lu",
                static_cast<unsigned long>(_filter_drops), static_cast<unsigned long>(_identity_drops),

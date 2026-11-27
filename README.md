@@ -354,7 +354,7 @@ Use the cursor in the actual reply when paging. The adapter keeps up to eight in
 | A remote rule command is rejected | Confirm the primary contact and ACL role over USB. Shared writes require the admin role. A writer's command timestamp must advance. |
 | An ID prefix is ambiguous | Use the complete 32-hex-character rule ID returned by the add command. |
 | Rule storage is full | Check `active`, `deleted`, and `capacity` in `rules status`. Deletions deliberately retain their slots. |
-| Rule storage is unavailable or a write fails | Retain the logs and use USB to inspect base operation. The firmware uses the last valid snapshot when available and avoids silently erasing corrupt policy files. |
+| Rule storage is unavailable or forwarding is held | Run `rules recovery` over USB. A missing or corrupt committed policy blocks forwarding. Recover a readable revision or initialize empty policy on USB, review the policy, and then run `rules resume`. |
 | No neighbour appears | Check the private channel is set, send a signed zero-hop advert over RF, enroll a client with an allow rule, check for a deny, and inspect `neighbours status`. |
 | Peer does not receive a rule | Check the sync key, domain, region flood configuration, origin trust, and rule scope. Start `rules sync` and allow time for queued updates. Inspect state on the receiving peer. |
 | Room does not answer | Verify the secondary contact, ACL membership, enabled setting, and session login. The normal USB and primary remote CLI remain the supported administration paths. |

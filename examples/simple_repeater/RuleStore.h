@@ -34,7 +34,8 @@ public:
   void begin(FILESYSTEM* fs, const mesh::LocalIdentity& node);
   Decision decide(Subject subject, const uint8_t* key) const;
   bool filterEnabled(Subject subject) const;
-  bool isReady() const { return _ready; }
+  bool forwardingAllowed() const { return _ready && !_forwarding_hold; }
+  void handleRecoveryCommand(const char* command, char* reply);
   bool restricted() const { return _state.restricted; }
   uint16_t unknownRate() const;
   const uint8_t* neighbourChannel() const { return _state.neighbour_channel; }
@@ -86,8 +87,11 @@ private:
   Snapshot _candidate{};
   int8_t _active_slot = -1;
   bool _ready = false;
+  bool _forwarding_hold = false;
+  uint8_t _invalid_slots = 0;
 
-  bool load(int slot, Snapshot& snapshot);
+  bool load(const char* path, Snapshot& snapshot);
+  bool verifyCandidate(const char* path, const uint8_t* digest);
   bool commit();
   static bool validate(const Snapshot& snapshot, const mesh::Identity& node);
   static bool validRule(const Rule& rule);
