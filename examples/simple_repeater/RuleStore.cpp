@@ -530,9 +530,10 @@ RuleStore::Decision RuleStore::decide(Subject subject, const uint8_t* key) const
   Decision decision = Unknown;
   for (size_t i = 0; i < _state.count; i++) {
     const auto& rule = _state.rules[i];
-    if (rule.deleted || rule.subject != subject || memcmp(rule.subject_key, key, PUB_KEY_SIZE) != 0) continue;
+    if (rule.deleted || rule.kind == Filter || memcmp(rule.subject_key, key, PUB_KEY_SIZE) != 0) continue;
+    // A signer can supply a different advertised role with the same key.
     if (rule.kind == Deny) return Denied;
-    if (rule.kind == Allow) decision = Allowed;
+    if (rule.subject == subject || subject == AnyDevice) decision = Allowed;
   }
   return decision;
 }

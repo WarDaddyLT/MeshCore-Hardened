@@ -168,6 +168,7 @@ Replace bracketed or angle-bracketed placeholders with real values. Type a scope
 | `rules add deny client <public-key> [scope]` | Blocks attributable activity for that companion. |
 | `rules add allow repeater <public-key> [scope]` | Allows signed repeater adverts under restricted policy. Sync trust is configured separately. |
 | `rules add deny repeater <public-key> [scope]` | Blocks the signed repeater identity and prevents acceptance of further sync updates it originated. |
+| `rules device <client\|repeater> <public-key>` | Shows the effective trust decision and recent signed advert counts for a full key. |
 | `rules add filter <1byte\|data\|public> <on\|off> [scope]` | Adds a scoped filter decision. |
 | `rules delete <id-or-prefix>` | Removes the selected rule and retains its deletion record. Delete shared rules on their originating repeater. |
 | `rules mode <open\|restricted>` | Selects the identity policy for traffic that the repeater can attribute. |
@@ -190,7 +191,7 @@ rules list
 
 Record the **32-hex-character rule ID** from `OK <id>`, then use that value in `show` or `delete`. Short prefixes require at least eight hex characters and must identify one record across both active rules and deletions. Repeating a delete on a known deletion is idempotent. Legacy messages can still cross the repeater while a client rule is active.
 
-A **deny** wins over **allow** for the same attributable subject. `open` is the default. It permits unknown identities that pass the other checks. `restricted` requires an explicit allow for signed client and repeater adverts. Existing non-guest ACL identities can still use management addressed to this repeater unless denied. An allow rule alone gives no CLI role.
+A **deny** wins over **allow** for the same attributable key, including when the key advertises a different role. An **allow** applies to its specified role. `open` is the default. It permits unknown identities that pass the other checks. `restricted` requires an explicit allow for signed client and repeater adverts. Existing non-guest ACL identities can still use management addressed to this repeater unless denied. An allow rule alone gives no CLI role. Recent activity counts are kept in RAM and never change trust.
 
 For managed filters, priority is local, then regional, then global. At the same scope the numerically higher revision wins, with the origin key breaking ties. A managed `off` removes the restriction from the winning managed rule. The effective forwarding filter stays on if the independently persisted base filter is on. Use the base `filter` command to change that setting.
 

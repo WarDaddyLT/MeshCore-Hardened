@@ -42,6 +42,7 @@
 #include "ForwardFilter.h"
 #include "RepeaterPrefsPolicy.h"
 #include "ReceiveWork.h"
+#include "DeviceActivity.h"
 #include "CliParse.h"
 
 #ifdef WITH_BRIDGE
@@ -93,6 +94,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   NodePrefs _prefs;
   FilterPrefs _filter_prefs;
   RuleStore _rules;
+  DeviceActivity _device_activity;
   uint32_t _filter_drops = 0;
   uint32_t _identity_drops = 0;
   uint32_t _rate_drops = 0;
@@ -184,7 +186,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool repairRepeaterPrefs();
   bool shouldDropByFilter(const mesh::Packet* packet) const;
   bool shouldDropByRate(const mesh::Packet* packet, forward_traffic::Budget& budget);
-  bool shouldDropAdvert(const mesh::Packet* packet) const;
+  bool allowVerifiedAdvert(const mesh::Packet& packet, bool observe);
+  void describeDevice(const char* args, char* reply);
 #ifdef WITH_BRIDGE
   bool shouldExportToBridge(mesh::Packet* packet);
 #endif
