@@ -385,7 +385,7 @@ void Mesh::routeDirectRecvAcks(Packet* packet, uint32_t delay_millis) {
         a1->path_len = Packet::copyPath(a1->path, packet->path, packet->path_len);
         a1->header &= ~PH_ROUTE_MASK;
         a1->header |= ROUTE_TYPE_DIRECT;
-        sendPacket(a1, 0, delay_millis);
+        queueForwardedPacket(a1, 0, delay_millis);
         delay_millis += 300;
       }
       extra--;
@@ -396,7 +396,7 @@ void Mesh::routeDirectRecvAcks(Packet* packet, uint32_t delay_millis) {
       a2->path_len = Packet::copyPath(a2->path, packet->path, packet->path_len);
       a2->header &= ~PH_ROUTE_MASK;
       a2->header |= ROUTE_TYPE_DIRECT;
-      sendPacket(a2, 0, delay_millis);
+      queueForwardedPacket(a2, 0, delay_millis);
     }
   }
 }

@@ -7,7 +7,8 @@ Build and flash development firmware as each feature lands. Formal native and fo
 | Source baseline | VERIFIED | Pinned [SaveMeshcore snapshot](source-baseline.md) in the independent MeshCore Hardened repository. |
 | RAK3401 development build | VERIFIED | `pio run -e RAK_3401_repeater` produced `.pio/build/RAK_3401_repeater/firmware.zip` with all firmware features below. Flash usage is 439,968 bytes (54.0%) and static RAM usage is 48,716 bytes (20.7%). |
 | Rule store and CLI | VERIFIED (build) | Persistent allow, deny and filter rules, stable IDs, pagination, durable deletion records and existing repeater CLI role checks. |
-| Packet policy | VERIFIED (build) | Verified-identity enforcement, existing packet filters, open and restricted modes, a shared forwarding budget for unattributed group and anonymous traffic, and aggregate drop counters. |
+| Packet policy | VERIFIED (build) | Verified-identity enforcement, existing packet filters, open and restricted modes, type and category forwarding limits, and aggregate drop counters. |
+| RF forwarding airtime and queue limits | IN PROGRESS (RF validation pending) | Separate RF airtime budgets and outstanding queue limits by category, reserved packet buffers for local service, and per-category admission counters. The controlled comparison against the pinned baseline is pending. |
 | Direct-neighbour notifications | VERIFIED (build) | Private-channel notices for verified zero-hop observations, with a bounded deduplication table and send interval. |
 | Policy synchronization | VERIFIED (build) | Signed, encrypted global and regional updates between provisioned repeaters, including deletion records and explicit reconciliation. |
 | Optional room identity | VERIFIED (build) | Separate persistent room identity, signed contact export, and a read-only room adapter. It defaults off pending stock Android validation. |

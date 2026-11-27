@@ -155,6 +155,8 @@ protected:
   }
 
   virtual DispatcherAction onRecvPacket(Packet* pkt) = 0;
+  virtual bool admitForwardedPacket(const Packet*) { return true; }
+  void queueForwardedPacket(Packet* packet, uint8_t priority, uint32_t delay_millis);
 
   virtual void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) { }   // custom hook
 

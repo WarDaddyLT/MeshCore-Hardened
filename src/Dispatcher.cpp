@@ -269,7 +269,15 @@ void Dispatcher::processRecvPacket(Packet* pkt) {
     uint8_t priority = (action >> 24) - 1;
     uint32_t _delay = action & 0xFFFFFF;
 
-    _mgr->queueOutbound(pkt, priority, futureMillis(_delay));
+    queueForwardedPacket(pkt, priority, _delay);
+  }
+}
+
+void Dispatcher::queueForwardedPacket(Packet* packet, uint8_t priority, uint32_t delay_millis) {
+  if (admitForwardedPacket(packet)) {
+    sendPacket(packet, priority, delay_millis);
+  } else {
+    releasePacket(packet);
   }
 }
 
