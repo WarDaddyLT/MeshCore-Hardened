@@ -12,6 +12,13 @@ constexpr uint8_t SharedPerMinute = 6;
 constexpr uint32_t NewEntryCheckpoint = 60;
 constexpr uint32_t ProgressCheckpoint = 15 * 60;
 
+inline bool freshStamp(uint32_t stamp, uint32_t wallSeconds, uint64_t uptimeMs) {
+  constexpr uint32_t UnsynchronizedEpoch = 1715770351;
+  constexpr uint32_t EarliestValidWallTime = 1735689600;  // 2025-01-01 UTC
+  return wallSeconds >= EarliestValidWallTime && wallSeconds > UnsynchronizedEpoch + uptimeMs / 1000
+      && forward_traffic::recentSignedStamp(stamp, wallSeconds);
+}
+
 struct Seconds {
   uint8_t bytes[4];
 
@@ -94,17 +101,13 @@ public:
 
   template<typename HasDecision>
   bool admit(const uint8_t* key, uint8_t subject, uint32_t stamp, uint32_t wallSeconds, uint64_t uptimeMs, bool transit,
-             HasDecision hasDecision) {
-    // The built-in volatile RTC starts at this epoch on boards without a
-    // running clock. Its default value cannot establish advert freshness.
-    constexpr uint32_t UnsynchronizedEpoch = 1715770351;
-    constexpr uint32_t EarliestValidWallTime = 1735689600;  // 2025-01-01 UTC
-    if (wallSeconds < EarliestValidWallTime || wallSeconds <= UnsynchronizedEpoch + uptimeMs / 1000
-        || !forward_traffic::recentSignedStamp(stamp, wallSeconds)) return false;
+             HasDecision hasDecision, bool canStart = true) {
+    if (!freshStamp(stamp, wallSeconds, uptimeMs)) return false;
 
     const uint32_t now = elapsed(uptimeMs);
     size_t index = find(key);
     if (index == Capacity) {
+      if (!canStart) return false;
       for (size_t i = 0; i < Capacity; ++i) {
         auto& entry = _snapshot.entries[i];
         if (entry.subject && !hasDecision(entry.key, entry.subject)) continue;

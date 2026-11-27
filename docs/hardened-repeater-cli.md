@@ -28,7 +28,8 @@ rules add deny repeater <64-hex-public-key> [scope]
 rules device <client|repeater> <64-hex-public-key>
 rules add filter 1byte|data|public on|off [scope]
 rules delete <rule-id-or-prefix>
-rules mode [normal|protected|restricted]
+rules mode [normal|protected|locked|restricted]
+rules freeze [start [minutes]|extend <minutes>|end]
 rules rate <packets-per-minute>
 rules airtime [percent]
 rules drops [category]
@@ -47,6 +48,14 @@ Signed client and repeater adverts from approved keys can still pass subject to 
 The repeater tracks up to 12 probation keys and reuses entries resolved by an administrator allow or deny. Freshness requires a synchronized repeater clock. Forwarding credit comes from monotonic uptime, so time offline or an adjustment to the wall clock does not fast-forward probation. New entries are saved in batches with at least a minute between writes and can forward only after their first successful save. Progress checkpoints are 15 minutes apart. A reboot can discard unsaved progress. A new key starts over. Use `rules device <role> <key>` to read whole hours remaining and `rules drops` to inspect probation drops.
 
 When an admin enters Protected, the repeater discards packets still queued for transmit. Bridge transit in Protected requires an explicitly allowed signed advert. Use `rules mode normal` to restore normal forwarding.
+
+### Locked mode and the enrollment freeze
+
+Use `rules mode locked` to require a fresh, signed client or repeater advert from an explicitly allowed key. A deny still takes precedence. Probation completion alone gives no Locked forwarding access. Legacy group messages and other unattributable transit are dropped even when a channel is private. Bridge transit follows the same approved-advert policy. Locked relay of existing policy sync requires a separately trusted and allowlisted repeater, plus the existing scope and signature checks. Entering Locked clears queued transmissions. Local authenticated administration remains available over USB and for enrolled administrators. Use `rules drops` to read Locked drops.
+
+`rules freeze start` begins a local 60-minute enrollment freeze. Supply minutes to choose another duration from 1 to 10080. `rules freeze extend <minutes>` adds time up to seven days remaining. `rules freeze end` ends the freeze. USB operators and authenticated mesh administrators can change it. An active freeze blocks new password-based enrollment and promotion, new guest registration, and new automatic Protected probation entries. Approved keys and existing probation keep their forwarding policy. Explicit authorized ACL and rule edits remain available for recovery and deliberate onboarding.
+
+The freeze is independent of mode and stays active across reboot. It counts powered-on time, checkpoints remaining time every 15 minutes, and ends after a successful expiry write. Reboot can restore up to the last checkpoint's remaining time. Wall-clock changes leave the timer alone. If storage cannot record expiry, the freeze stays active and can be ended by an authorized operator when storage recovers.
 
 The store supports 24 total entries, including deletion records. An update is written to the alternate snapshot and read back before the active state changes. It verifies snapshot integrity and rule signatures at boot. Retaining deletion records prevents old copies from restoring deleted rules, so new entries are rejected when the table fills. The last valid snapshot stays available when a write fails.
 
@@ -96,7 +105,7 @@ Forwarding admission limits each category to four outstanding packets in the out
 
 `rules drops` shows totals by reason. `rules drops <category>` reports airtime drops, queue drops, and the estimated airtime admitted for RF forwarding. Admission totals include frames that may later fail to transmit. Use radio counters and path evidence to validate actual RF delivery.
 
-Valid v5 and v6 rule snapshots load with the default airtime share. A v5 snapshot also defaults its type and category packet policies to allow. Snapshots from v5 through v7 load with an empty probation ledger. The next policy write uses v8. Back up policy before installing an older build that lacks this snapshot format.
+Valid v5 and v6 rule snapshots load with the default airtime share. A v5 snapshot also defaults its type and category packet policies to allow. Snapshots from v5 through v7 load with an empty probation ledger. Snapshots from v5 through v8 load with the enrollment freeze off. The next policy write uses v9. Back up policy before installing an older build that lacks this snapshot format.
 
 ## Receive work and diagnostics
 
