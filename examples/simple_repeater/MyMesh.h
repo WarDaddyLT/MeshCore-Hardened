@@ -168,6 +168,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool shouldDropByRate(const mesh::Packet* packet, ForwardBudget& budget);
   bool shouldDropAdvert(const mesh::Packet* packet, bool signature_verified) const;
   bool shouldDenyClient(const mesh::Identity& id);
+  bool neighbourChannelUsable() const;
   void noteDirectNeighbour(const mesh::Identity& id, bool repeater);
   void sendNeighbourNotice();
   void handleNeighbourCommand(const char* command, char* reply, bool usb);

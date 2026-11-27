@@ -11,3 +11,6 @@
 
 // True if the packet is GRP_TXT or GRP_DATA on the default "Public" channel.
 bool isPublicChannelPacket(const mesh::Packet* packet);
+
+// True if the 16-byte key is the built-in "Public" channel key.
+bool isPublicChannelKey(const uint8_t* key);

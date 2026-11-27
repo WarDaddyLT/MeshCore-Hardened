@@ -60,7 +60,7 @@ neighbours show <index>
 neighbours reset
 ```
 
-Use the same 16-byte secret in the stock app's private channel. Configure and reset from USB. A verified zero-hop radio advertisement can queue a notice for a repeater or for a client enrolled with an allow rule. The table holds up to 32 identities per boot or deliberate reset. It sends at most one notice every five minutes. With a default transport region, notices use that region. Otherwise they are zero-hop. A signed advert authenticates its contents. MeshCore hop metadata describes the received route and cannot prove physical proximity against an RF replay.
+Use the same 16-byte secret in the stock app's private channel. The repeater rejects the built-in Public key during setup. A previously saved Public key is reported as `channel=blocked` and cannot send notices. Configure and reset from USB. A verified zero-hop radio advertisement can queue a notice for a repeater or for a client enrolled with an allow rule. The table holds up to 32 identities per boot or deliberate reset. It sends at most one notice every five minutes. With a default transport region, notices use that region. Otherwise they are zero-hop. A signed advert authenticates its contents. MeshCore hop metadata describes the received route and cannot prove physical proximity against an RF replay.
 
 ## Shared policy
 
