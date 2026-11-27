@@ -227,7 +227,7 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
 
 bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
   if (memcmp(snapshot.magic, Magic, sizeof(Magic)) != 0
-      || snapshot.restricted > 1 || snapshot.count > Capacity || snapshot.room_enabled > 1 || !snapshot.traffic.valid()
+      || snapshot.mode > LegacyRestricted || snapshot.count > Capacity || snapshot.room_enabled > 1 || !snapshot.traffic.valid()
       || snapshot.airtime_share > 100
       || snapshot.room_name[sizeof(snapshot.room_name) - 1]
       || snapshot.domain[ScopeNameSize - 1] || snapshot.region[ScopeNameSize - 1]) return false;
@@ -621,7 +621,7 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
   if (savemesh::matchesValue(command, "status")) {
     snprintf(reply, 150, "rev=%lu active=%u deleted=%u capacity=%u mode=%s rate=%u airtime=%u",
              static_cast<unsigned long>(decodeRevision(_state.revision)), active, _state.count - active,
-             static_cast<unsigned>(Capacity), restricted() ? "restricted" : "open", unknownRate(),
+             static_cast<unsigned>(Capacity), modeName(), unknownRate(),
              airtimeShare());
     return;
   }
@@ -640,6 +640,10 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     int index = find(arg);
     if (index >= 0 && !_state.rules[index].deleted) describe(index, reply);
     else strcpy(reply, index == -2 ? "Err - ID ambiguous" : "Err - no active rule");
+    return;
+  }
+  if (savemesh::matchesValue(command, "mode")) {
+    snprintf(reply, 150, "mode=%s", modeName());
     return;
   }
   TrafficTarget traffic{};
@@ -741,13 +745,13 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     }
     changed->deleted = 1;
   } else if (savemesh::matchCommand(command, "mode", &arg)) {
-    if (savemesh::matchesValue(arg, "restricted")) _candidate.restricted = 1;
-    else if (savemesh::matchesValue(arg, "open")) _candidate.restricted = 0;
+    if (savemesh::matchesValue(arg, "restricted")) _candidate.mode = LegacyRestricted;
+    else if (savemesh::matchesValue(arg, "normal") || savemesh::matchesValue(arg, "open")) _candidate.mode = Normal;
     else {
-      strcpy(reply, "Err - use open or restricted");
+      strcpy(reply, "Err - use normal or restricted");
       return;
     }
-    if (_candidate.restricted == _state.restricted) {
+    if (_candidate.mode == _state.mode) {
       strcpy(reply, "OK");
       return;
     }

@@ -6,7 +6,7 @@ The existing MeshCore repeater CLI and SaveMeshcore filter commands are availabl
 
 The MeshCore USB web configurator's **Access control** panel uses the same `get acl` and `setperm` commands as the serial console. Use that panel or `setperm <64-hex-public-key> 3` over USB to approve a key directly. An enrolled key can use stock repeater login with an empty password where the client permits it.
 
-Normal operation (currently `open`) also allows the stock remote login to enroll or promote a key through a configured admin password. Use `password <new-password>` to set it or `password` with no argument to clear it. Fresh installs have no admin password configured. The current `restricted` mode disables password-based enrollment. Protected and Locked will have the same behavior when implemented. Guest login follows its separate permissions.
+Normal mode allows the stock remote login to enroll or promote a key through a configured admin password. Use `password <new-password>` to set it or `password` with no argument to clear it. Fresh installs have no admin password configured. Legacy Restricted mode disables password-based enrollment. Guest login follows its separate permissions.
 
 Use `get acl` on USB to review installed roles and `setperm <64-hex-public-key> 0` to revoke an entry. An unambiguous byte-aligned prefix also works for revocation. In Normal, rotate or clear the enrollment password if a revoked operator knows it.
 
@@ -28,13 +28,15 @@ rules add deny repeater <64-hex-public-key> [scope]
 rules device <client|repeater> <64-hex-public-key>
 rules add filter 1byte|data|public on|off [scope]
 rules delete <rule-id-or-prefix>
-rules mode open|restricted
+rules mode [normal|restricted]
 rules rate <packets-per-minute>
 rules airtime [percent]
 rules drops [category]
 ```
 
 Scope defaults to `local`. Use `global:<domain>` or `region:<name>` after provisioning sync. Rule changes and explicit sync requests require physical USB or the mesh admin role. Read-only and read-write ACL users can inspect rules and status. Use full 32-hex-character rule IDs when deleting. Prefixes of at least eight hex characters work when unique across active rules and retained deletion records. A shared rule is deleted on its originating repeater. `rules list` returns one active rule per response. Pass the returned `next` value as the next cursor until the response is `End`.
+
+Normal is the default mode. It forwards stock traffic subject to the configured filters, attributable bans, and forwarding limits. An existing `open` setting reads as `normal` after upgrade, and `rules mode open` remains an alias. An existing `restricted` setting remains active and keeps its prior allowlist and enrollment behavior. Upgrade leaves the saved rule and filter settings in place.
 
 The store supports 24 total entries, including deletion records. An update is written to the alternate snapshot and read back before the active state changes. It verifies snapshot integrity and rule signatures at boot. Retaining deletion records prevents old copies from restoring deleted rules, so new entries are rejected when the table fills. The last valid snapshot stays available when a write fails.
 

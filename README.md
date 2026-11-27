@@ -143,7 +143,7 @@ get acl
 setperm <companion-public-key> 3
 ```
 
-Use **Access control** in the MeshCore USB web configurator or `setperm` over the USB console to approve a key directly. In normal operation, the current `open` setting, the stock remote login can also enroll a key using a configured admin password. Set it with `password <new-password>` or leave it unset for key-only access. The current `restricted` setting blocks password-based enrollment. An enrolled key can still log in with an empty password where the client permits it. Use `get acl` over USB to inspect roles and `setperm <companion-public-key> 0` to revoke one. In `open`, rotate or clear the enrollment password if the revoked operator knows it. Browser and Android checks on hardware remain pending.
+Use **Access control** in the MeshCore USB web configurator or `setperm` over the USB console to approve a key directly. In Normal, the stock remote login can also enroll a key using a configured admin password. Set it with `password <new-password>` or leave it unset for key-only access. Legacy Restricted blocks password-based enrollment. An enrolled key can still log in with an empty password where the client permits it. Use `get acl` over USB to inspect roles and `setperm <companion-public-key> 0` to revoke one. In Normal, rotate or clear the enrollment password if the revoked operator knows it. Browser and Android checks on hardware remain pending.
 
 | Existing ACL role | Hardened access over the primary repeater CLI |
 | --- | --- |
@@ -171,7 +171,7 @@ Replace bracketed or angle-bracketed placeholders with real values. Type a scope
 | `rules device <client\|repeater> <public-key>` | Shows the effective trust decision and recent signed advert counts for a full key. |
 | `rules add filter <1byte\|data\|public> <on\|off> [scope]` | Adds a scoped filter decision. |
 | `rules delete <id-or-prefix>` | Removes the selected rule and retains its deletion record. Delete shared rules on their originating repeater. |
-| `rules mode <open\|restricted>` | Selects the identity policy for traffic that the repeater can attribute. |
+| `rules mode [normal\|restricted]` | Reads or selects the forwarding mode. `open` remains an alias for `normal`. |
 | `rules rate <0–600>` | Sets an independent packet count limit per minute for each of group text, group data, and anonymous requests. Use `0` to disable this cap. |
 | `rules traffic type <id>` or `rules traffic category <name>` | Read or change local per-type and category forwarding policy. Actions are `allow`, `drop`, and `limit <packets-per-minute>`. |
 | `rules airtime [0–100]` | Reads or sets the percentage of the configured radio duty cycle that each RF forwarding category may use over time. Defaults to 25%. Use `0` to disable the per-category airtime share. |
@@ -191,11 +191,11 @@ rules list
 
 Record the **32-hex-character rule ID** from `OK <id>`, then use that value in `show` or `delete`. Short prefixes require at least eight hex characters and must identify one record across both active rules and deletions. Repeating a delete on a known deletion is idempotent. Legacy messages can still cross the repeater while a client rule is active.
 
-A **deny** wins over **allow** for the same attributable key, including when the key advertises a different role. An **allow** applies to its specified role. `open` is the default. It permits unknown identities that pass the other checks. `restricted` requires an explicit allow for signed client and repeater adverts. Existing non-guest ACL identities can still use management addressed to this repeater unless denied. An allow rule alone gives no CLI role. Recent activity counts are kept in RAM and never change trust.
+A **deny** wins over **allow** for the same attributable key, including when the key advertises a different role. An **allow** applies to its specified role. Normal is the default and permits unknown identities that pass the other checks. Upgrades load saved `open` as Normal and keep saved `restricted` active. Legacy Restricted requires an explicit allow for signed client and repeater adverts. Existing non-guest ACL identities can still use management addressed to this repeater unless denied. An allow rule alone gives no CLI role. Recent activity counts are kept in RAM and never change trust.
 
 For managed filters, priority is local, then regional, then global. At the same scope the numerically higher revision wins, with the origin key breaking ties. A managed `off` removes the restriction from the winning managed rule. The effective forwarding filter stays on if the independently persisted base filter is on. Use the base `filter` command to change that setting.
 
-The following commands add a local managed restriction, enable restricted identity policy, and limit group text, group data, and anonymous requests to 30 forwarding candidates per minute each. To return to open mode with the added packet cap disabled, use `rules mode open` and `rules rate 0`. Remove the example filter using the ID returned by its add command.
+The following commands add a local managed restriction, enable legacy restricted identity policy, and limit group text, group data, and anonymous requests to 30 forwarding candidates per minute each. To return to Normal with the added packet cap disabled, use `rules mode normal` and `rules rate 0`. Remove the example filter using the ID returned by its add command.
 
 ```text
 rules add filter public on local

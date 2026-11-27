@@ -15,6 +15,8 @@ public:
   enum Subject : uint8_t { AnyDevice, Client, Repeater, OneByte, Data, Public };
   enum Decision : uint8_t { Unknown, Allowed, Denied };
   enum Scope : uint8_t { Local, Region, Global };
+  // Keep the on-disk values used by open and restricted in v5–v7 snapshots.
+  enum Mode : uint8_t { Normal = 0, LegacyRestricted = 1 };
 
   struct Rule {
     uint8_t id[IdSize];
@@ -37,7 +39,8 @@ public:
   bool filterEnabled(Subject subject) const;
   bool forwardingAllowed() const { return _ready && !_forwarding_hold; }
   void handleRecoveryCommand(const char* command, char* reply);
-  bool restricted() const { return _state.restricted; }
+  Mode mode() const { return static_cast<Mode>(_state.mode); }
+  const char* modeName() const { return mode() == Normal ? "normal" : "restricted"; }
   uint16_t unknownRate() const;
   uint8_t airtimeShare() const { return _state.airtime_share; }
   const forward_traffic::Policy& trafficPolicy() const { return _state.traffic; }
@@ -66,7 +69,7 @@ private:
   struct Snapshot {
     uint8_t magic[4];
     uint8_t revision[4];
-    uint8_t restricted;
+    uint8_t mode;
     uint8_t count;
     uint8_t unknown_rate[2];
     uint8_t neighbour_channel[ChannelKeySize];
