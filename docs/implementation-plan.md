@@ -40,3 +40,11 @@ The imported baseline commit `0bf5d85388fb98bd0b392301776786b56c31079b` contains
 | Locally created packets and policy control | Signed self-adverts, discovery, replies, notices, and sync can enter the dispatcher without going through the ordinary forwarding hook. Apply the budget for their own category and the same radio constraints. Verify authenticated control peers and the policy issuer separately. |
 
 Audit references include [core routing](../src/Mesh.cpp), [radio dispatch](../src/Dispatcher.cpp), [repeater policy](../examples/simple_repeater/MyMesh.cpp), [RS232 bridging](../src/helpers/bridges/RS232Bridge.cpp), and [ESP-NOW bridging](../src/helpers/bridges/ESPNowBridge.cpp). The mode behavior above is the implementation target.
+
+## Policy precedence and recovery
+
+1. Parse the frame and apply the route's structure, path, scope, loop, and duplicate checks before expensive decisions where routing semantics permit. Keep inherited filters in force.
+2. Attribute a source only when the frame or authenticated management exchange supports it. A matching deny takes precedence over an allowlist or probation. Apply the active mode to remaining traffic. Normal can admit stock legacy traffic. Protected requires attribution and can admit probationary keys. Locked needs a verified allowlisted key.
+3. Charge approved traffic to a category budget and, where attributable, the corresponding per-key budget. The radio scheduler still applies the configured airtime and queue limits. Aggregate counters report the drop reason.
+4. Keep local restrictions local. A subnet mode change requires an authorized issuer and authenticated policy propagation. Keep subnet and region scope independent. A local restriction can further limit the effective policy without weakening an active subnet restriction. A reboot or partition retains the last valid committed policy and marks unconfirmed peers stale or unknown. An interrupted first-time setup keeps managed forwarding disabled.
+5. Use trustworthy elapsed time for probation and temporary restrictions. An unreliable clock cannot advance probation or silently relax a restriction. Resume time-based changes once the clock can support them. Keep authorized USB recovery available.
