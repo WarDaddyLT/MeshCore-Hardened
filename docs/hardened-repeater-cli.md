@@ -40,6 +40,36 @@ Deny takes precedence over allow for a verified identity. Forwarding decisions u
 
 Managed filter rules can add restrictions to the existing filters. The most specific active managed filter wins, in the order local, region, then global. Within a scope, revisions are ordered numerically with the originating key breaking ties. A managed `off` removes the restriction contributed by managed rules. Use the existing `filter` command for the independently persisted base filter.
 
+## Forwarding controls by packet type and category
+
+These controls are local to the repeater. They apply to RF forwarding and bridge exports. Local management requests still use the existing ACL.
+
+```text
+rules traffic
+rules traffic type 0x06
+rules traffic type 6 drop
+rules traffic type 0x06 allow
+rules traffic category group-text
+rules traffic category group-text limit 30
+```
+
+Use decimal packet types `0` to `15` or hex `0x00` to `0x0f`. Omit the action to read the current setting. Actions are `allow`, `drop`, or `limit <1..600>` forwarding candidates per minute. USB and mesh admins can make changes. Inspect-only ACL roles can read settings. All new settings initially allow traffic through this policy.
+
+| Category | Packet types |
+| --- | --- |
+| `group-text` | Group text |
+| `group-data` | Group data |
+| `direct-text` | Direct text, including transit CLI text |
+| `discovery` | Advertisements and route traces |
+| `anonymous` | Anonymous requests |
+| `routing` | ACK, returned paths, and multipart |
+| `management` | Request, response, and control |
+| `other` | Reserved and custom types |
+
+A type drop or category drop blocks that traffic. An allow leaves the other configured controls in force, including the inherited SaveMeshcore filters and the legacy shared `rules rate` cap. A frame must fit every applicable type and category cap. RF and bridge export budgets are separate. The dispatcher still owns the radio airtime limit.
+
+The rules store reads valid snapshots from builds before these controls and defaults their traffic settings to allow. The next policy write saves the expanded snapshot. Back up policy before installing an older build that lacks this snapshot format.
+
 ## Policy storage recovery
 
 The repeater checks each committed policy snapshot and its revision record at boot. If the expected policy is missing or corrupt, RF forwarding and bridge exports stop. The USB CLI and enrolled local management remain available.

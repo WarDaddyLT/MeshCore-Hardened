@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <helpers/IdentityStore.h>
+#include "ForwardTraffic.h"
 
 class RuleStore {
 public:
@@ -38,6 +39,7 @@ public:
   void handleRecoveryCommand(const char* command, char* reply);
   bool restricted() const { return _state.restricted; }
   uint16_t unknownRate() const;
+  const forward_traffic::Policy& trafficPolicy() const { return _state.traffic; }
   const uint8_t* neighbourChannel() const { return _state.neighbour_channel; }
   bool setNeighbourChannel(const uint8_t* key);
   const uint8_t* syncKey() const { return _state.sync_key; }
@@ -79,6 +81,7 @@ private:
       uint8_t timestamp[4];
     } remote_writers[8];
     Rule rules[Capacity];
+    forward_traffic::Policy traffic;
     uint8_t digest[32];
   };
 

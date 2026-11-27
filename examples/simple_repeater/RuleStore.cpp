@@ -9,7 +9,8 @@ constexpr const char* Pending = "/hardened_rules_tmp";
 constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
 constexpr const char* Provisioned = "/hardened_rules_provisioned";
 constexpr const char* ForwardingHold = "/hardened_rules_hold";
-constexpr uint8_t Magic[] = {'M', 'C', 'H', 5};
+constexpr uint8_t Magic[] = {'M', 'C', 'H', 6};
+constexpr uint8_t LegacyMagic[] = {'M', 'C', 'H', 5};
 constexpr char SigningDomain[] = "MeshCore Hardened policy v1";
 constexpr size_t SignedSize = sizeof(SigningDomain) + RuleStore::ScopeNameSize * 2
                             + offsetof(RuleStore::Rule, signature) + PUB_KEY_SIZE;
@@ -99,6 +100,61 @@ bool decodeKey(const char* arg, uint8_t* key) {
   return *arg == 0 || *arg == ' ';
 }
 
+struct TrafficTarget {
+  unsigned index;
+  bool category;
+
+  const forward_traffic::Limit& select(const forward_traffic::Policy& policy) const {
+    return category ? policy.categories[index] : policy.types[index];
+  }
+
+  void set(forward_traffic::Policy& policy, uint16_t value) const {
+    (category ? policy.categories[index] : policy.types[index]).set(value);
+  }
+};
+
+bool parseTrafficTarget(const char* input, TrafficTarget& target, const char** action) {
+  const char* name;
+  if (savemesh::matchCommand(input, "category", &name)) {
+    for (unsigned i = 0; i < forward_traffic::CategoryCount; ++i) {
+      if (savemesh::matchCommand(name, forward_traffic::CategoryNames[i], action)) {
+        target = {i, true};
+        return true;
+      }
+    }
+  } else if (savemesh::matchCommand(input, "type", &name)) {
+    const char* end = name + strcspn(name, " ");
+    size_t length = end - name;
+    int value = -1;
+    if (length == 4 && name[0] == '0' && savemesh::lowerAscii(name[1]) == 'x' && name[2] == '0') {
+      value = hexValue(name[3]);
+    } else if (length == 1 || length == 2) {
+      char number[3]{};
+      memcpy(number, name, length);
+      uint16_t parsed;
+      if (savemesh::parseUnsigned(number, &parsed)) value = parsed;
+    }
+    if (value >= 0 && value < static_cast<int>(forward_traffic::TypeCount)) {
+      target = {static_cast<unsigned>(value), false};
+      while (*end == ' ') ++end;
+      *action = end;
+      return true;
+    }
+  }
+  return false;
+}
+
+void describeTraffic(const TrafficTarget& target, uint16_t limit, char* reply) {
+  char number[5];
+  snprintf(number, sizeof(number), "0x%02x", target.index);
+  const char* name = target.category ? forward_traffic::CategoryNames[target.index] : number;
+  if (limit == 0 || limit == forward_traffic::Drop) {
+    snprintf(reply, 150, "%s %s %s", target.category ? "category" : "type", name, limit ? "drop" : "allow");
+  } else {
+    snprintf(reply, 150, "%s %s limit %u", target.category ? "category" : "type", name, static_cast<unsigned>(limit));
+  }
+}
+
 const char* kindName(uint8_t kind) {
   switch (kind) {
     case RuleStore::Allow: return "allow";
@@ -140,15 +196,33 @@ bool RuleStore::validRule(const Rule& rule) {
 bool RuleStore::load(const char* path, Snapshot& snapshot) {
   auto file = openRead(_fs, path);
   if (!file) return false;
-  bool ok = file.size() == sizeof(snapshot)
-         && file.read(reinterpret_cast<uint8_t*>(&snapshot), sizeof(snapshot)) == sizeof(snapshot);
+  auto* bytes = reinterpret_cast<uint8_t*>(&snapshot);
+  const size_t size = file.size();
+  if (size == sizeof(snapshot)) {
+    bool complete = file.read(bytes, sizeof(snapshot)) == sizeof(snapshot);
+    file.close();
+    return complete;
+  }
+
+  constexpr size_t legacyPrefix = offsetof(Snapshot, traffic);
+  uint8_t legacyDigest[sizeof(snapshot.digest)];
+  bool complete = size == legacyPrefix + sizeof(legacyDigest)
+      && file.read(bytes, legacyPrefix) == legacyPrefix
+      && file.read(legacyDigest, sizeof(legacyDigest)) == sizeof(legacyDigest);
   file.close();
-  return ok;
+  if (!complete || memcmp(snapshot.magic, LegacyMagic, sizeof(LegacyMagic)) != 0) return false;
+
+  mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, legacyPrefix);
+  if (memcmp(legacyDigest, snapshot.digest, sizeof(legacyDigest)) != 0) return false;
+  memcpy(snapshot.magic, Magic, sizeof(Magic));
+  snapshot.traffic = {};
+  mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, offsetof(Snapshot, digest));
+  return true;
 }
 
 bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
   if (memcmp(snapshot.magic, Magic, sizeof(Magic)) != 0
-      || snapshot.restricted > 1 || snapshot.count > Capacity || snapshot.room_enabled > 1
+      || snapshot.restricted > 1 || snapshot.count > Capacity || snapshot.room_enabled > 1 || !snapshot.traffic.valid()
       || snapshot.room_name[sizeof(snapshot.room_name) - 1]
       || snapshot.domain[ScopeNameSize - 1] || snapshot.region[ScopeNameSize - 1]) return false;
 
@@ -560,6 +634,32 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     else strcpy(reply, index == -2 ? "Err - ID ambiguous" : "Err - no active rule");
     return;
   }
+  TrafficTarget traffic{};
+  uint16_t trafficLimit = 0;
+  bool setTraffic = savemesh::matchCommand(command, "traffic", &arg);
+  if (setTraffic) {
+    if (!*arg) {
+      strcpy(reply, "type 0..15; categories: group-text group-data direct-text discovery anonymous routing management other");
+      return;
+    }
+    const char* action;
+    if (!parseTrafficTarget(arg, traffic, &action)) {
+      strcpy(reply, "Err - expected traffic type <0..15> or category <name>");
+      return;
+    }
+    if (!*action) {
+      describeTraffic(traffic, traffic.select(_state.traffic).get(), reply);
+      return;
+    }
+    const char* rate;
+    if (savemesh::matchesValue(action, "drop")) trafficLimit = forward_traffic::Drop;
+    else if (!savemesh::matchesValue(action, "allow")
+             && (!savemesh::matchCommand(action, "limit", &rate)
+                 || !savemesh::parseUnsigned(rate, &trafficLimit) || !trafficLimit || trafficLimit > forward_traffic::MaxRate)) {
+      strcpy(reply, "Err - use allow, drop or limit <1..600>");
+      return;
+    }
+  }
   if (!can_write) {
     strcpy(reply, "Err - write permission required");
     return;
@@ -592,7 +692,13 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
   }
   encodeRevision(_candidate.revision, revision + 1);
   Rule* changed = nullptr;
-  if (savemesh::matchCommand(command, "delete", &arg)) {
+  if (setTraffic) {
+    if (traffic.select(_state.traffic).get() == trafficLimit) {
+      strcpy(reply, "OK");
+      return;
+    }
+    traffic.set(_candidate.traffic, trafficLimit);
+  } else if (savemesh::matchCommand(command, "delete", &arg)) {
     int index = find(arg);
     if (index < 0) {
       strcpy(reply, index == -2 ? "Err - ID ambiguous" : "Err - unknown ID");
@@ -689,7 +795,7 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
       }
     }
   } else {
-    strcpy(reply, "Err - use rules count/list/show/add/delete/status/mode/rate");
+    strcpy(reply, "Err - use rules count/list/show/add/delete/status/mode/rate/traffic");
     return;
   }
 
