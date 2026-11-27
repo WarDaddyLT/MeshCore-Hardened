@@ -195,6 +195,16 @@ bool RuleStore::validRule(const Rule& rule) {
                               : rule.subject == Client || rule.subject == Repeater);
 }
 
+size_t RuleStore::reserveRuleSlot(Snapshot& snapshot) {
+  if (snapshot.count < Capacity) return snapshot.count++;
+  for (size_t i = 0; i < snapshot.count; ++i) {
+    // Local rules never arrive from sync. Reuse that slot in place to
+    // preserve other indexes, including an ongoing shared sync cursor.
+    if (snapshot.rules[i].scope == Local && snapshot.rules[i].deleted) return i;
+  }
+  return Capacity;
+}
+
 bool RuleStore::load(const char* path, Snapshot& snapshot) {
   auto file = openRead(_fs, path);
   if (!file) return false;
@@ -529,9 +539,12 @@ RuleStore::MergeResult RuleStore::mergeRule(Rule& rule, const uint8_t* fingerpri
     }
     break;
   }
-  if (index == Capacity || decodeRevision(_state.revision) == UINT32_MAX) return Rejected;
+  if (decodeRevision(_state.revision) == UINT32_MAX) return Rejected;
   _candidate = _state;
-  if (index == _candidate.count) ++_candidate.count;
+  if (index == _state.count) {
+    index = reserveRuleSlot(_candidate);
+    if (index == Capacity) return Rejected;
+  }
   _candidate.rules[index] = rule;
   encodeRevision(_candidate.revision, decodeRevision(_state.revision) + 1);
   return commit() ? Changed : Rejected;
@@ -659,7 +672,12 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     return;
   }
   unsigned active = 0;
-  for (size_t i = 0; i < _state.count; i++) active += !_state.rules[i].deleted;
+  unsigned free = Capacity - _state.count;
+  for (size_t i = 0; i < _state.count; i++) {
+    const auto& rule = _state.rules[i];
+    active += !rule.deleted;
+    free += rule.deleted && rule.scope == Local;
+  }
 
   const char* arg;
   if (savemesh::matchesValue(command, "count")) {
@@ -667,9 +685,9 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     return;
   }
   if (savemesh::matchesValue(command, "status")) {
-    snprintf(reply, 150, "rev=%lu active=%u deleted=%u capacity=%u mode=%s rate=%u airtime=%u freeze=%s",
+    snprintf(reply, 150, "rev=%lu active=%u deleted=%u capacity=%u free=%u mode=%s rate=%u airtime=%u freeze=%s",
              static_cast<unsigned long>(decodeRevision(_state.revision)), active, _state.count - active,
-             static_cast<unsigned>(Capacity), modeName(), unknownRate(),
+             static_cast<unsigned>(Capacity), free, modeName(), unknownRate(),
              airtimeShare(), enrollmentFrozen() ? "active" : "off");
     return;
   }
@@ -853,13 +871,14 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     _candidate.unknown_rate[0] = limit & 0xFF;
     _candidate.unknown_rate[1] = limit >> 8;
   } else if (savemesh::matchCommand(command, "add", &arg)) {
-    if (_candidate.count == Capacity) {
+    const size_t slot = reserveRuleSlot(_candidate);
+    if (slot == Capacity) {
       strcpy(reply, "Err - rule storage full");
       return;
     }
     const char* subject;
     const char* value;
-    changed = &_candidate.rules[_candidate.count++];
+    changed = &_candidate.rules[slot];
     *changed = Rule{};
     if (savemesh::matchCommand(arg, "filter", &subject)) {
       changed->kind = Filter;

@@ -114,6 +114,7 @@ private:
   bool commit();
   static bool validate(const Snapshot& snapshot, const mesh::Identity& node);
   static bool validRule(const Rule& rule);
+  static size_t reserveRuleSlot(Snapshot& snapshot);
   static void signableBytes(const Snapshot& snapshot, const Rule& rule, uint8_t* bytes);
   const char* parseScope(const char* input, uint8_t& scope) const;
   int find(const char* id) const;
