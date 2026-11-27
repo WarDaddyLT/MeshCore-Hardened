@@ -48,3 +48,17 @@ Audit references include [core routing](../src/Mesh.cpp), [radio dispatch](../sr
 3. Charge approved traffic to a category budget and, where attributable, the corresponding per-key budget. The radio scheduler still applies the configured airtime and queue limits. Aggregate counters report the drop reason.
 4. Keep local restrictions local. A subnet mode change requires an authorized issuer and authenticated policy propagation. Keep subnet and region scope independent. A local restriction can further limit the effective policy without weakening an active subnet restriction. A reboot or partition retains the last valid committed policy and marks unconfirmed peers stale or unknown. An interrupted first-time setup keeps managed forwarding disabled.
 5. Use trustworthy elapsed time for probation and temporary restrictions. An unreliable clock cannot advance probation or silently relax a restriction. Resume time-based changes once the clock can support them. Keep authorized USB recovery available.
+
+## RF acceptance thresholds
+
+Use these initial thresholds for the controlled alpha bench. Confirm the packet size, transmission interval, legal airtime, and RF isolation in preflight for each board and preset. Record at least 20 intended stock-client deliveries per profile and run both an idle and a loaded scenario with the same radio configuration and inherited filters on SaveMeshcore and Hardened. Run a separate isolated category-limit scenario with the data filter off on both builds. Verify the forwarding route through path or repeater counter evidence.
+
+| Profile | Pass threshold |
+| --- | --- |
+| Quiet Normal | At least 95% stock-client delivery. The 95th-percentile delivery time is at most the baseline value plus the greater of two seconds or 20%. |
+| Normal under controlled load in a different category | At least 90% delivery for the legitimate messages, with 95th-percentile delivered-message latency at most 15 seconds. Record attacker-category forwarding airtime against the configured cap and confirm dispatcher limits. |
+| Separate unaffected subnet | Meets the quiet Normal thresholds while the other subnet changes mode or experiences controlled abuse. |
+| Protected and Locked | Zero forwarded frames from the disallowed test classes or attributable banned keys. Verify intended stock exclusions, allowed attributable traffic, and unchanged policy on the unaffected subnet. |
+| Recovery and onboarding | Zero managed forwards before either onboarding path commits. Validate the applied revision and return to quiet Normal thresholds after restoring Normal and clearing the controlled load. |
+
+Record every attempted legitimate send in the delivery-rate denominator. Report latency for delivered messages. A same-class legacy spam test measures total class containment and documents any stock-message loss separately because the repeater has no verifiable sender to prioritize within that class.
