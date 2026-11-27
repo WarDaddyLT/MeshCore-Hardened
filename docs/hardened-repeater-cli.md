@@ -12,6 +12,8 @@ Use `get acl` on USB to review installed roles and `setperm <64-hex-public-key> 
 
 The first ACL change copies the existing roles into the repeater's versioned ACL store. A successful command commits the new roles before returning. Routes are rebuilt through normal MeshCore exchanges. If a committed ACL cannot be read, use physical USB to enroll a trusted administrator again. The repeater keeps the legacy contacts file for rollback. An older firmware uses the legacy permissions, so review the ACL after a rollback. Stock-client interoperability and power-loss behavior on hardware remain pending.
 
+The unauthenticated Ethernet console exposes only `eth.status`, `ver`, and `board`. Manage the repeater through USB or the authenticated mesh CLI.
+
 ## Persistent rules
 
 ```text
@@ -30,7 +32,7 @@ rules rate <packets-per-minute>
 rules drops
 ```
 
-Scope defaults to `local`. Use `global:<domain>` or `region:<name>` after provisioning sync. The USB console and MeshCore ACL users with write access can edit local rules. Publishing shared rules over MeshCore requires the admin role. Use full 32-hex-character rule IDs when deleting. Prefixes of at least eight hex characters work when unique across active rules and retained deletion records. A shared rule is deleted on its originating repeater. `rules list` returns one active rule per response. Pass the returned `next` value as the next cursor until the response is `End`.
+Scope defaults to `local`. Use `global:<domain>` or `region:<name>` after provisioning sync. Rule changes and explicit sync requests require physical USB or the mesh admin role. Read-only and read-write ACL users can inspect rules and status. Use full 32-hex-character rule IDs when deleting. Prefixes of at least eight hex characters work when unique across active rules and retained deletion records. A shared rule is deleted on its originating repeater. `rules list` returns one active rule per response. Pass the returned `next` value as the next cursor until the response is `End`.
 
 The store supports 24 total entries, including deletion records. An update is written to the alternate snapshot and read back before the active state changes. It verifies snapshot integrity and rule signatures at boot. Retaining deletion records prevents old copies from restoring deleted rules, so new entries are rejected when the table fills. The last valid snapshot stays available when a write fails.
 

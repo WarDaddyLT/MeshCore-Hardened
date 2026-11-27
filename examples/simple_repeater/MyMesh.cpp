@@ -1601,6 +1601,16 @@ void MyMesh::handleFilterCommand(const char* name, const char* arg, uint8_t& set
 
 void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply,
                            const ClientInfo* client, bool ethernet) {
+  if (ethernet) {
+    while (*command == ' ') ++command;
+    if (matchesValue(command, "ver") || matchesValue(command, "board")) {
+      _cli.handleCommand(sender_timestamp, command, reply);
+    } else {
+      strcpy(reply, "Err - use USB or authenticated mesh CLI");
+    }
+    return;
+  }
+
   if (region_load_active && (!client || client->isAdmin())) {
     if (StrHelper::isBlank(command)) {  // empty/blank line, signal to terminate 'load' operation
       region_map = temp_map;  // copy over the temp instance as new current map
@@ -1644,27 +1654,23 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 
   const char* args;
-  if (!ethernet && (!client || client->isAdmin()) && handleAdminRoomCommand(command, reply, !client)) return;
-  if (!ethernet && (!client || client->isAdmin()) && matchCommand(command, "neighbours", &args)) {
+  if ((!client || client->isAdmin()) && handleAdminRoomCommand(command, reply, !client)) return;
+  if ((!client || client->isAdmin()) && matchCommand(command, "neighbours", &args)) {
     handleNeighbourCommand(args, reply, !client);
     return;
   }
   if (matchCommand(command, "rules", &args)) {
-    if (ethernet) {
-      strcpy(reply, "Err - use USB or authenticated mesh CLI");
-      return;
-    }
     if (matchesValue(args, "drops")) {
       snprintf(reply, 150, "filter=%lu identity=%lu rate=%lu",
                static_cast<unsigned long>(_filter_drops), static_cast<unsigned long>(_identity_drops),
                static_cast<unsigned long>(_rate_drops));
       return;
     }
-    bool can_write = !client || (client->permissions & PERM_ACL_ROLE_MASK) >= PERM_ACL_READ_WRITE;
+    bool can_write = !client || client->isAdmin();
     if (handleSyncCommand(args, reply, !client, can_write)) return;
     bool sync_requested = false;
     _rules.handleCommand(args, reply, self_id, client ? &client->id : nullptr,
-                         sender_timestamp, *getRNG(), can_write, !client || client->isAdmin(), sync_requested);
+                         sender_timestamp, *getRNG(), can_write, can_write, sync_requested);
     if (sync_requested) _sync_cursor = 0;
     return;
   }
@@ -1674,10 +1680,6 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 
   if (matchCommand(command, "password", &args)) {
-    if (ethernet) {
-      strcpy(reply, "Err - use USB or authenticated mesh CLI");
-      return;
-    }
     if (strlen(args) >= sizeof(_prefs.password)) {
       strcpy(reply, "Err - password too long");
       return;
@@ -1698,10 +1700,6 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 
   // handle ACL related commands
   if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
-    if (ethernet) {
-      strcpy(reply, "Err - use USB or authenticated mesh CLI");
-      return;
-    }
     char* hex = &command[8];
     while (*hex == ' ') ++hex;
     char* separator = strchr(hex, ' ');
