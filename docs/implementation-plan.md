@@ -23,3 +23,7 @@ The RAK3401 detected the enrolled ThinkNode M5 from a signed zero-hop advert. Th
 The RAK3401 forwarded private group text before, during, and after the deny. The captures matched the temporary channel and the RAK3401's hop hash. Legacy group text carries no cryptographically verifiable sender identity for a transit repeater.
 
 The T-Echo Lite Kit accepted official firmware updates over DFU but did not answer companion queries over USB. The RAK3401's USB console applied and removed the test rules, so the T-Echo remote admin flow remains pending. Cleanup restored the repeater's previous forwarding and notification settings, cleared the temporary M5 channel, and left no active test rules. The two test deletion records remain in the rule store.
+
+## First-alpha baseline build
+
+The imported baseline commit `0bf5d85388fb98bd0b392301776786b56c31079b` contains the [pinned SaveMeshcore source](source-baseline.md). Building an isolated export of that commit with `pio run -e RAK_3401_repeater` produced a DFU ZIP with SHA-256 `d647d0be4b79c10b9dccd07f77ec0d40f88f7c6023cfb5fd93285b5063925178`. PlatformIO reported 413,232 bytes of flash and 35,652 bytes of static RAM. No MeshCore USB ports were present at inventory, so R2, the two stock companions, and RF evidence are pending.
