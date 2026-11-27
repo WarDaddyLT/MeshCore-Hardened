@@ -11,6 +11,18 @@ The actor scenario checks whether two Hardened repeaters drop a banned device's 
 
 ## Run from CLion
 
+From the repository root in CLion's Terminal, with the four USB devices connected:
+
+```sh
+./scripts/hil/bench.sh list
+./scripts/hil/bench.sh prepare
+./scripts/hil/bench.sh run --isolated-rf
+```
+
+The first `prepare` installs the pinned dependency in `.venv/hil`, writes the four verified public-key pins to `hil_config.local.json`, and checks the bench. On another checkout, fill in the USB selectors in that local file first. Existing pins must match the attached devices. `run` repeats preflight before transmitting and writes its reports to `out/hil/actor.*`. Use `bench.sh preflight` for a read-only readiness check. Use `bench.sh build` to compile the installable RAK 1W and ThinkNode M5 images with PlatformIO. The build command only compiles, and firmware installation is a separate operation.
+
+To run directly with a Python Run Configuration:
+
 1. Install the requirements with `python -m pip install -r scripts/hil/requirements.txt`. Configure that Python interpreter in the CLion run configuration, or run the same commands in CLion's Terminal.
 2. Use the repository root as the working directory and `scripts/hil/run.py` as the script. Run it with `--list` to see USB selectors.
 3. Copy `hil_config.example.json` to `hil_config.local.json` in this directory. Fill in the stable selectors. On Linux, `"by_id": "/dev/serial/by-id/…"` can replace a serial number or location. You may record a known artifact's source commit as `firmware_git_sha` in each role. Run with `--identify` and pin the public keys in the local file after checking the devices.
