@@ -9,6 +9,7 @@ Build and flash development firmware as each feature lands. Formal native and fo
 | Rule store and CLI | VERIFIED (build) | Persistent allow, deny and filter rules, stable IDs, pagination, durable deletion records and existing repeater CLI role checks. |
 | Packet policy | VERIFIED (build) | Verified-identity enforcement, existing packet filters, open and restricted modes, type and category forwarding limits, and aggregate drop counters. |
 | RF forwarding airtime and queue limits | IN PROGRESS (RF validation pending) | Separate RF airtime budgets and outstanding queue limits by category, reserved packet buffers for local service, and per-category admission counters. The controlled comparison against the pinned baseline is pending. |
+| Bounded receive work | IN PROGRESS (RF validation pending) | Early frame and duplicate checks, bounded verification and delayed queues, and volatile diagnostics instead of a persistent packet log. CPU, queue and airtime measurements under controlled RF load are pending. |
 | Direct-neighbour notifications | VERIFIED (build) | Private-channel notices for verified zero-hop observations, with a bounded deduplication table and send interval. |
 | Policy synchronization | VERIFIED (build) | Signed, encrypted global and regional updates between provisioned repeaters, including deletion records and explicit reconciliation. |
 | Optional room identity | VERIFIED (build) | Separate persistent room identity, signed contact export, and a read-only room adapter. It defaults off pending stock Android validation. |

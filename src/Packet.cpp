@@ -64,9 +64,12 @@ uint8_t Packet::writeTo(uint8_t dest[]) const {
 
 bool Packet::readFrom(const uint8_t src[], uint8_t len) {
   received_over_radio = false;
+  if (len < 2) return false;
   uint8_t i = 0;
   header = src[i++];
+  if (getPayloadVer() > PAYLOAD_VER_1) return false;
   if (hasTransportCodes()) {
+    if (len < 6) return false;
     memcpy(&transport_codes[0], &src[i], 2); i += 2;
     memcpy(&transport_codes[1], &src[i], 2); i += 2;
   } else {
@@ -76,9 +79,9 @@ bool Packet::readFrom(const uint8_t src[], uint8_t len) {
   if (!isValidPathLen(path_len)) return false;   // bad encoding
 
   uint8_t bl = getPathByteLen();
+  if (i + bl >= len) return false;   // path and nonempty payload must both be present
   memcpy(path, &src[i], bl); i += bl;
 
-  if (i >= len) return false;   // bad encoding
   payload_len = len - i;
   if (payload_len > sizeof(payload)) return false;  // bad encoding
   memcpy(payload, &src[i], payload_len); //i += payload_len;

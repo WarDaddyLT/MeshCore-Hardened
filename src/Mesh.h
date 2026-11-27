@@ -32,10 +32,12 @@ class Mesh : public Dispatcher {
   void removeSelfFromPath(Packet* packet);
   void routeDirectRecvAcks(Packet* packet, uint32_t delay_millis);
   //void routeRecvAcks(Packet* packet, uint32_t delay_millis);
-  DispatcherAction forwardMultipartDirect(Packet* pkt, uint32_t delay_millis);
+  DispatcherAction forwardMultipartDirect(Packet* pkt);
 
 protected:
   DispatcherAction onRecvPacket(Packet* pkt) override;
+  virtual bool verifyReceivedAdvert(const Packet& packet);
+  virtual bool admitAnonDecrypt() { return true; }
 
   virtual uint32_t getCADFailRetryDelay() const override;
 

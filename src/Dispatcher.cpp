@@ -147,6 +147,7 @@ void Dispatcher::loop() {
 }
 
 bool Dispatcher::tryParsePacket(Packet* pkt, const uint8_t* raw, int len) {
+  if (len < 2 || len > MAX_TRANS_UNIT) return false;
   int i = 0;
 
   pkt->header = raw[i++];
@@ -156,6 +157,7 @@ bool Dispatcher::tryParsePacket(Packet* pkt, const uint8_t* raw, int len) {
   }
 
   if (pkt->hasTransportCodes()) {
+    if (len < 6) return false;
     memcpy(&pkt->transport_codes[0], &raw[i], 2); i += 2;
     memcpy(&pkt->transport_codes[1], &raw[i], 2); i += 2;
   } else {
@@ -202,7 +204,9 @@ void Dispatcher::checkRecv() {
       if (pkt == NULL) {
         MESH_DEBUG_PRINTLN("%s Dispatcher::checkRecv(): WARNING: received data, no unused packets available!", getLogDateTime());
       } else {
-        if (tryParsePacket(pkt, raw, len)) {
+        const bool parsed = tryParsePacket(pkt, raw, len);
+        if (!parsed) onMalformedPacket();
+        if (parsed && admitReceivedPacket(pkt)) {
           pkt->received_over_radio = true;
           pkt->_snr = _radio->getLastSNR() * 4.0f;
           score = _radio->packetScore(_radio->getLastSNR(), len);
@@ -250,7 +254,11 @@ void Dispatcher::checkRecv() {
         if (_delay > MAX_RX_DELAY_MILLIS) {
           _delay = MAX_RX_DELAY_MILLIS;
         }
-        _mgr->queueInbound(pkt, futureMillis(_delay)); // add to delayed inbound queue
+        if (admitDelayedPacket()) {
+          _mgr->queueInbound(pkt, futureMillis(_delay));
+        } else {
+          _mgr->free(pkt);
+        }
       }
     } else {
       n_recv_direct++;

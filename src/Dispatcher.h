@@ -155,6 +155,9 @@ protected:
   }
 
   virtual DispatcherAction onRecvPacket(Packet* pkt) = 0;
+  virtual bool admitReceivedPacket(const Packet*) { return true; }
+  virtual bool admitDelayedPacket() { return true; }
+  virtual void onMalformedPacket() {}
   virtual bool admitForwardedPacket(const Packet*) { return true; }
   void queueForwardedPacket(Packet* packet, uint8_t priority, uint32_t delay_millis);
 
