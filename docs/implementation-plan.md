@@ -27,3 +27,16 @@ The T-Echo Lite Kit accepted official firmware updates over DFU but did not answ
 ## First-alpha baseline build
 
 The imported baseline commit `0bf5d85388fb98bd0b392301776786b56c31079b` contains the [pinned SaveMeshcore source](source-baseline.md). Building an isolated export of that commit with `pio run -e RAK_3401_repeater` produced a DFU ZIP with SHA-256 `d647d0be4b79c10b9dccd07f77ec0d40f88f7c6023cfb5fd93285b5063925178`. PlatformIO reported 413,232 bytes of flash and 35,652 bytes of static RAM. No MeshCore USB ports were present at inventory, so R2, the two stock companions, and RF evidence are pending.
+
+## Forwarding and identity audit
+
+| Current receive or transmit path | Identity evidence and alpha treatment |
+| --- | --- |
+| Direct RF transit, including TRACE and multipart ACKs | A path selects a next hop. It does not identify the source or relay. Direct packets reach the repeater policy hook before duplicate checks on several branches. In Normal, keep the stock routing behavior with packet and category controls. Protected and Locked require verified attribution for ordinary transit, including any control frame eligible for forwarding. |
+| Flood and transport-scoped flood | Region, hop, loop, and duplicate checks constrain the route. Stock group text and group data carry channel data but no verifiable sender. A stock anonymous request carries a claimed key whose authentication is checkable at its destination. Normal uses packet, region, recognized-channel, and class controls for this transit traffic. Protected and Locked drop unattributable traffic. |
+| Client and repeater advertisements | The flood handler verifies the signature before invoking the advert callback. The direct forwarding hook currently verifies only in cases where a key decision would otherwise block the advert. Protected and Locked must verify each admitted advert, with separate freshness evidence before crediting probation. An advert does not authenticate later group messages or establish the most recent RF hop. |
+| Primary local service and optional admin room | Authenticated local management uses a full key selected through the MeshCore shared-secret exchange, with current ACL checks. The local room is read-only. Keep bounded USB recovery and authenticated management available independent of forwarding mode. Replies still use the radio budget. |
+| Bridge input and output | Bridge input enters the delayed receive queue, and bridge output can be selected from RX or TX logging hooks. Treat both as policy boundaries. A bridge connection or injected packet provides no additional proof of the stock packet's original sender. |
+| Locally created packets and policy control | Signed self-adverts, discovery, replies, notices, and sync can enter the dispatcher without going through the ordinary forwarding hook. Apply the budget for their own category and the same radio constraints. Verify authenticated control peers and the policy issuer separately. |
+
+Audit references include [core routing](../src/Mesh.cpp), [radio dispatch](../src/Dispatcher.cpp), [repeater policy](../examples/simple_repeater/MyMesh.cpp), [RS232 bridging](../src/helpers/bridges/RS232Bridge.cpp), and [ESP-NOW bridging](../src/helpers/bridges/ESPNowBridge.cpp). The mode behavior above is the implementation target.
