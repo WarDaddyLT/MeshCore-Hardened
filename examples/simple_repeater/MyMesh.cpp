@@ -831,9 +831,14 @@ static bool isShare(const mesh::Packet *packet) {
   return false;
 }
 
+bool MyMesh::neighbourChannelUsable() const {
+  static_assert(RuleStore::ChannelKeySize == CIPHER_KEY_SIZE, "Check notice channel key size");
+  const uint8_t* key = _rules.neighbourChannel();
+  return !mesh::Utils::isZeroes(key, RuleStore::ChannelKeySize) && !isPublicChannelKey(key);
+}
+
 void MyMesh::noteDirectNeighbour(const mesh::Identity& id, bool repeater) {
-  const uint8_t empty[RuleStore::ChannelKeySize]{};
-  if (memcmp(_rules.neighbourChannel(), empty, sizeof(empty)) == 0) return;
+  if (!neighbourChannelUsable()) return;
   uint32_t now = getRTCClock()->getCurrentTime();
   for (size_t i = 0; i < _notice_count; i++) {
     if (id.matches(_notices[i].key)) {
@@ -850,7 +855,7 @@ void MyMesh::noteDirectNeighbour(const mesh::Identity& id, bool repeater) {
 }
 
 void MyMesh::sendNeighbourNotice() {
-  if (!_rules.forwardingAllowed()) return;
+  if (!_rules.forwardingAllowed() || !neighbourChannelUsable()) return;
   if (_next_notice && !millisHasNowPassed(_next_notice)) return;
   if (_mgr->getOutboundTotal() != 0) return;
   for (size_t i = 0; i < _notice_count; i++) {
@@ -883,14 +888,14 @@ void MyMesh::sendNeighbourNotice() {
 }
 
 void MyMesh::handleNeighbourCommand(const char* command, char* reply, bool usb) {
-  const uint8_t empty[RuleStore::ChannelKeySize]{};
   const char* arg;
   if (matchesValue(command, "status")) {
-    bool enabled = memcmp(_rules.neighbourChannel(), empty, sizeof(empty)) != 0;
+    const char* channel = isPublicChannelKey(_rules.neighbourChannel()) ? "blocked"
+        : neighbourChannelUsable() ? "set" : "off";
     unsigned pending = 0;
     for (size_t i = 0; i < _notice_count; i++) pending += _notices[i].pending;
     snprintf(reply, 150, "channel=%s observed=%u pending=%u",
-             enabled ? "set" : "off", static_cast<unsigned>(_notice_count), pending);
+             channel, static_cast<unsigned>(_notice_count), pending);
     return;
   }
   if (matchCommand(command, "show", &arg)) {
@@ -921,10 +926,8 @@ void MyMesh::handleNeighbourCommand(const char* command, char* reply, bool usb) 
   }
   uint8_t key[RuleStore::ChannelKeySize]{};
   if (!matchesValue(arg, "off")) {
-    const uint8_t public_key[] = {0x8b, 0x33, 0x87, 0xc9, 0xc5, 0xcd, 0xea, 0x6a,
-                                  0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72};
     if (!savemesh::isHex(arg, 2 * sizeof(key)) || !mesh::Utils::fromHex(key, sizeof(key), arg)
-        || memcmp(key, empty, sizeof(key)) == 0 || memcmp(key, public_key, sizeof(key)) == 0) {
+        || mesh::Utils::isZeroes(key, sizeof(key)) || isPublicChannelKey(key)) {
       strcpy(reply, "Err - expected a 16-byte private channel key");
       return;
     }

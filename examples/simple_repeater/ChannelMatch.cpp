@@ -5,6 +5,7 @@
 
 namespace {
 
+static_assert(CIPHER_KEY_SIZE == 16, "Review Public matching for a new channel key size");
 static_assert(PUB_KEY_SIZE == 32, "Review Public matching for a new key size");
 static_assert(CIPHER_MAC_SIZE == 2, "Review Public matching for a new MAC size");
 static_assert(CIPHER_BLOCK_SIZE == 16, "Review Public matching for a new cipher block size");
@@ -36,6 +37,10 @@ bool macMatches(const uint8_t* secret, const uint8_t* mac_and_data, int len) {
   return memcmp(mac, mac_and_data, CIPHER_MAC_SIZE) == 0;
 }
 
+}
+
+bool isPublicChannelKey(const uint8_t* key) {
+  return memcmp(key, PUBLIC_CHANNEL_SECRET, CIPHER_KEY_SIZE) == 0;
 }
 
 bool isPublicChannelPacket(const mesh::Packet* packet) {
