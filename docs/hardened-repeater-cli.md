@@ -4,9 +4,11 @@ The existing MeshCore repeater CLI and SaveMeshcore filter commands are availabl
 
 ## Administrator enrollment
 
-From the physical USB console, use `setperm <64-hex-public-key> 3` to approve the first administrator key. An enrolled client uses the stock repeater login with an empty password where the client permits it. Login cannot grant a role. A configured guest password permits guest access only.
+The MeshCore USB web configurator's **Access control** panel uses the same `get acl` and `setperm` commands as the serial console. Use that panel or `setperm <64-hex-public-key> 3` over USB to approve a key directly. An enrolled key can use stock repeater login with an empty password where the client permits it.
 
-Use `get acl` on USB to review the installed roles. Firmware upgrades retain the existing ACL, so review and revoke any unknown entries from earlier password-based deployments. Revoke a role with `setperm <64-hex-public-key> 0`. An unambiguous byte-aligned prefix also works for revocation.
+Normal operation (currently `open`) also allows the stock remote login to enroll or promote a key through a configured admin password. Use `password <new-password>` to set it or `password` with no argument to clear it. Fresh installs have no admin password configured. The current `restricted` mode disables password-based enrollment. Protected and Locked will have the same behavior when implemented. Guest login follows its separate permissions.
+
+Use `get acl` on USB to review installed roles and `setperm <64-hex-public-key> 0` to revoke an entry. An unambiguous byte-aligned prefix also works for revocation. In Normal, rotate or clear the enrollment password if a revoked operator knows it.
 
 The first ACL change copies the existing roles into the repeater's versioned ACL store. A successful command commits the new roles before returning. Routes are rebuilt through normal MeshCore exchanges. If a committed ACL cannot be read, use physical USB to enroll a trusted administrator again. The repeater keeps the legacy contacts file for rollback. An older firmware uses the legacy permissions, so review the ACL after a rollback. Stock-client interoperability and power-loss behavior on hardware remain pending.
 

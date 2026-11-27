@@ -100,17 +100,26 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
   ClientInfo* client = acl.getClient(sender.pub_key, PUB_KEY_SIZE);
   if (sender_timestamp <= (client ? client->last_timestamp : 0)) return 0;
 
-  if (data[0] != 0) {
-    if (!_prefs.guest_password[0]
-        || strncmp(reinterpret_cast<const char*>(data), _prefs.guest_password, sizeof(_prefs.guest_password)) != 0
-        || (client && (client->permissions & PERM_ACL_ROLE_MASK) != PERM_ACL_GUEST)) return 0;
-    if (!client) {
-      client = acl.putClient(sender, PERM_ACL_GUEST, true);
-      if (!client) return 0;
-      memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
+  if (!client || data[0] != 0) {
+    const char* password = reinterpret_cast<const char*>(data);
+    // Open is the current CLI equivalent of Normal. Strict modes retain the ACL
+    // login path and prevent password-based enrollment or promotion.
+    bool admin_login = _rules.isReady() && !_rules.restricted() && !acl.needsRecovery()
+        && _prefs.password[0] && strncmp(password, _prefs.password, sizeof(_prefs.password)) == 0;
+    if (admin_login) {
+      uint8_t permissions = client ? client->permissions & ~PERM_ACL_ROLE_MASK : 0;
+      permissions |= PERM_ACL_ADMIN;
+      if (!acl.updatePermissions(self_id, sender.pub_key, PUB_KEY_SIZE, permissions)) return 0;
+      client = acl.getClient(sender.pub_key, PUB_KEY_SIZE);
+    } else {
+      if (strncmp(password, _prefs.guest_password, sizeof(_prefs.guest_password)) != 0
+          || (client && (client->permissions & PERM_ACL_ROLE_MASK) != PERM_ACL_GUEST)) return 0;
+      if (!client) {
+        client = acl.putClient(sender, PERM_ACL_GUEST, true);
+        if (!client) return 0;
+        memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
+      }
     }
-  } else if (!client || (client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) {
-    return 0;
   }
 
   client->last_timestamp = sender_timestamp;
@@ -1250,7 +1259,6 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
-  memset(_prefs.password, 0, sizeof(_prefs.password));  // retain the legacy field layout
   repairRepeaterPrefs();
   _filter_prefs.begin(_fs);
   acl.begin(_fs, self_id);
@@ -1663,7 +1671,23 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 
   if (matchCommand(command, "password", &args)) {
-    strcpy(reply, "Err - admin login requires an approved key");
+    if (ethernet) {
+      strcpy(reply, "Err - use USB or authenticated mesh CLI");
+      return;
+    }
+    if (strlen(args) >= sizeof(_prefs.password)) {
+      strcpy(reply, "Err - password too long");
+      return;
+    }
+    char previous[sizeof(_prefs.password)];
+    memcpy(previous, _prefs.password, sizeof(previous));
+    StrHelper::strncpy(_prefs.password, args, sizeof(_prefs.password));
+    if (!_cli.savePrefs(_fs)) {
+      memcpy(_prefs.password, previous, sizeof(previous));
+      strcpy(reply, "Err - password write failed");
+      return;
+    }
+    strcpy(reply, *args ? "OK - password saved" : "OK - password enrollment disabled");
     return;
   }
 
@@ -1715,7 +1739,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     }
     strcpy(reply, "OK");
   } else if (sender_timestamp == 0 && strcmp(command, "get acl") == 0) {
-    Serial.println(acl.needsRecovery() ? "ACL recovery required:" : "ACL:");
+    Serial.println("ACL:");
+    if (acl.needsRecovery()) Serial.println("ACL recovery required. Enroll a trusted key over USB.");
     for (int i = 0; i < acl.getNumClients(); i++) {
       auto c = acl.getClientByIdx(i);
       if (c->permissions == 0) continue;  // skip deleted (or guest) entries
