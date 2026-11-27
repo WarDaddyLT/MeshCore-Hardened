@@ -2,6 +2,14 @@
 
 The existing MeshCore repeater CLI and SaveMeshcore filter commands are available alongside the commands below. The new features use the repeater's existing public identity for management. Configure the optional features from the USB serial console. The isolated secondary room identity starts disabled.
 
+## Administrator enrollment
+
+From the physical USB console, use `setperm <64-hex-public-key> 3` to approve the first administrator key. An enrolled client uses the stock repeater login with an empty password where the client permits it. Login cannot grant a role. A configured guest password permits guest access only.
+
+Use `get acl` on USB to review the installed roles. Firmware upgrades retain the existing ACL, so review and revoke any unknown entries from earlier password-based deployments. Revoke a role with `setperm <64-hex-public-key> 0`. An unambiguous byte-aligned prefix also works for revocation.
+
+The first ACL change copies the existing roles into the repeater's versioned ACL store. A successful command commits the new roles before returning. Routes are rebuilt through normal MeshCore exchanges. If a committed ACL cannot be read, use physical USB to enroll a trusted administrator again. The repeater keeps the legacy contacts file for rollback. An older firmware uses the legacy permissions, so review the ACL after a rollback. Stock-client interoperability and power-loss behavior on hardware remain pending.
+
 ## Persistent rules
 
 ```text

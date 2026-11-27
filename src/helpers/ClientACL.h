@@ -60,8 +60,9 @@ public:
   bool clear();
 
   ClientInfo* getClient(const uint8_t* pubkey, int key_len);
-  ClientInfo* putClient(const mesh::Identity& id, uint8_t init_perms);
-  bool applyPermissions(const mesh::LocalIdentity& self_id, const uint8_t* pubkey, int key_len, uint8_t perms);
+  ClientInfo* putClient(const mesh::Identity& id, uint8_t init_perms, bool evict_guests_only = false);
+  bool applyPermissions(const mesh::LocalIdentity& self_id, const uint8_t* pubkey, int key_len,
+                        uint8_t perms, bool evict_guests_only = false);
 
   int getNumClients() const { return num_clients; }
   ClientInfo* getClientByIdx(int idx) { return &clients[idx]; }

@@ -31,10 +31,6 @@
   #define ADVERT_LON 0.0
 #endif
 
-#ifndef ADMIN_PASSWORD
-  #define ADMIN_PASSWORD "password"
-#endif
-
 #ifndef SERVER_RESPONSE_DELAY
   #define SERVER_RESPONSE_DELAY 300
 #endif
@@ -60,7 +56,6 @@
 
 #define CLI_REPLY_DELAY_MILLIS      600
 
-#define LAZY_CONTACTS_WRITE_DELAY    5000
 static constexpr uint8_t PolicyType = 0xA1;
 static constexpr size_t PolicyNonceSize = 12;
 static constexpr size_t PolicyTagSize = 12;
@@ -101,46 +96,25 @@ void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float sn
 }
 
 uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood) {
-  ClientInfo* client = NULL;
-  if (data[0] == 0) {   // blank password, just check if sender is in ACL
-    client = acl.getClient(sender.pub_key, PUB_KEY_SIZE);
-    if (client == NULL) {
-    #if MESH_DEBUG
-      MESH_DEBUG_PRINTLN("Login, sender not in ACL");
-    #endif
-    }
-  }
-  if (client == NULL) {
-    uint8_t perms;
-    if (strcmp((char *)data, _prefs.password) == 0) { // check for valid admin password
-      perms = PERM_ACL_ADMIN;
-    } else if (strcmp((char *)data, _prefs.guest_password) == 0) { // check guest password
-      perms = PERM_ACL_GUEST;
-    } else {
-#if MESH_DEBUG
-      MESH_DEBUG_PRINTLN("Invalid password: %s", data);
-#endif
-      return 0;
-    }
+  // Mesh dispatch has already matched the shared secret against the received packet.
+  ClientInfo* client = acl.getClient(sender.pub_key, PUB_KEY_SIZE);
+  if (sender_timestamp <= (client ? client->last_timestamp : 0)) return 0;
 
-    client = acl.putClient(sender, 0);  // add to contacts (if not already known)
-    if (sender_timestamp <= client->last_timestamp) {
-      MESH_DEBUG_PRINTLN("Possible login replay attack!");
-      return 0;  // FATAL: client table is full -OR- replay attack
+  if (data[0] != 0) {
+    if (!_prefs.guest_password[0]
+        || strncmp(reinterpret_cast<const char*>(data), _prefs.guest_password, sizeof(_prefs.guest_password)) != 0
+        || (client && (client->permissions & PERM_ACL_ROLE_MASK) != PERM_ACL_GUEST)) return 0;
+    if (!client) {
+      client = acl.putClient(sender, PERM_ACL_GUEST, true);
+      if (!client) return 0;
+      memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
     }
-
-    MESH_DEBUG_PRINTLN("Login success!");
-    client->last_timestamp = sender_timestamp;
-    client->last_activity = getRTCClock()->getCurrentTime();
-    client->permissions &= ~0x03;
-    client->permissions |= perms;
-    memcpy(client->shared_secret, secret, PUB_KEY_SIZE);
-
-    if (perms != PERM_ACL_GUEST) {   // keep number of FS writes to a minimum
-      dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
-    }
+  } else if (!client || (client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) {
+    return 0;
   }
 
+  client->last_timestamp = sender_timestamp;
+  client->last_activity = getRTCClock()->getCurrentTime();
   if (is_flood) {
     client->out_path_len = OUT_PATH_UNKNOWN;  // need to rediscover out_path
   }
@@ -1056,6 +1030,13 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       uint8_t temp[166];
       char *command = (char *)&data[5];
       char *reply = (char *)&temp[5];
+      // An ACL command can remove or move the entry for the current sender.
+      const mesh::Identity sender = client->id;
+      uint8_t cli_reply_path[MAX_PATH_SIZE];
+      uint8_t cli_reply_path_len = client->out_path_len;
+      if (cli_reply_path_len != OUT_PATH_UNKNOWN) {
+        mesh::Packet::copyPath(cli_reply_path, client->out_path, cli_reply_path_len);
+      }
       if (is_retry) {
         *reply = 0;
       } else {
@@ -1071,12 +1052,12 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
         memcpy(temp, &timestamp, 4);        // mostly an extra blob to help make packet_hash unique
         temp[4] = (TXT_TYPE_CLI_DATA << 2); // NOTE: legacy was: TXT_TYPE_PLAIN
 
-        auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id, secret, temp, 5 + text_len);
+        auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, sender, secret, temp, 5 + text_len);
         if (reply) {
-          if (client->out_path_len == OUT_PATH_UNKNOWN) {
+          if (cli_reply_path_len == OUT_PATH_UNKNOWN) {
             sendFloodReply(reply, CLI_REPLY_DELAY_MILLIS, packet->getPathHashSize());
           } else {
-            sendDirect(reply, client->out_path, client->out_path_len, CLI_REPLY_DELAY_MILLIS);
+            sendDirect(reply, cli_reply_path, cli_reply_path_len, CLI_REPLY_DELAY_MILLIS);
           }
         }
       }
@@ -1201,7 +1182,6 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   last_millis = 0;
   uptime_millis = 0;
   next_local_advert = next_flood_advert = 0;
-  dirty_contacts_expiry = 0;
   set_radio_at = revert_radio_at = 0;
   _logging = false;
   region_load_active = false;
@@ -1219,7 +1199,6 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   StrHelper::strncpy(_prefs.node_name, ADVERT_NAME, sizeof(_prefs.node_name));
   _prefs.node_lat = ADVERT_LAT;
   _prefs.node_lon = ADVERT_LON;
-  StrHelper::strncpy(_prefs.password, ADMIN_PASSWORD, sizeof(_prefs.password));
   _prefs.freq = LORA_FREQ;
   _prefs.sf = LORA_SF;
   _prefs.bw = LORA_BW;
@@ -1271,9 +1250,10 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
+  memset(_prefs.password, 0, sizeof(_prefs.password));  // retain the legacy field layout
   repairRepeaterPrefs();
   _filter_prefs.begin(_fs);
-  acl.load(_fs, self_id);
+  acl.begin(_fs, self_id);
   _rules.begin(_fs, self_id);
   _room_identity_loaded = _rules.loadRoomIdentity(_room_identity)
                        && _room_identity.pub_key[0] != self_id.pub_key[0];
@@ -1682,33 +1662,60 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     return;
   }
 
+  if (matchCommand(command, "password", &args)) {
+    strcpy(reply, "Err - admin login requires an approved key");
+    return;
+  }
+
   if (handleProtectedPrefsCommand(sender_timestamp, command, reply)) return;
 
   // handle ACL related commands
   if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
+    if (ethernet) {
+      strcpy(reply, "Err - use USB or authenticated mesh CLI");
+      return;
+    }
     char* hex = &command[8];
-    char* sp = strchr(hex, ' ');   // look for separator char
-    if (sp == NULL) {
+    while (*hex == ' ') ++hex;
+    char* separator = strchr(hex, ' ');
+    if (!separator) {
       strcpy(reply, "Err - bad params");
-    } else {
-      *sp++ = 0;   // replace space with null terminator
+      return;
+    }
+    *separator++ = 0;
+    while (*separator == ' ') ++separator;
 
-      uint8_t pubkey[PUB_KEY_SIZE];
-      int hex_len = min(sp - hex, PUB_KEY_SIZE*2);
-      if (mesh::Utils::fromHex(pubkey, hex_len / 2, hex)) {
-        uint8_t perms = atoi(sp);
-        if (acl.applyPermissions(self_id, pubkey, hex_len / 2, perms)) {
-          dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);   // trigger acl.save()
-          strcpy(reply, "OK");
-        } else {
-          strcpy(reply, "Err - invalid params");
-        }
-      } else {
-        strcpy(reply, "Err - bad pubkey");
+    uint16_t permissions;
+    if (!parseUnsigned(separator, &permissions) || permissions > UINT8_MAX) {
+      strcpy(reply, "Err - invalid permissions");
+      return;
+    }
+
+    size_t hex_len = strlen(hex);
+    size_t key_len = hex_len / 2;
+    uint8_t pubkey[PUB_KEY_SIZE];
+    if (hex_len == 0 || hex_len % 2 != 0 || key_len > PUB_KEY_SIZE
+        || !savemesh::isHex(hex, hex_len) || !mesh::Utils::fromHex(pubkey, key_len, hex)) {
+      strcpy(reply, "Err - bad pubkey");
+      return;
+    }
+    if (key_len < PUB_KEY_SIZE && (permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST) {
+      unsigned matches = 0;
+      for (int i = 0; i < acl.getNumClients(); ++i) {
+        if (memcmp(acl.getClientByIdx(i)->id.pub_key, pubkey, key_len) == 0) ++matches;
+      }
+      if (matches > 1) {
+        strcpy(reply, "Err - ambiguous key prefix");
+        return;
       }
     }
+    if (!acl.updatePermissions(self_id, pubkey, key_len, static_cast<uint8_t>(permissions))) {
+      strcpy(reply, "Err - ACL update failed");
+      return;
+    }
+    strcpy(reply, "OK");
   } else if (sender_timestamp == 0 && strcmp(command, "get acl") == 0) {
-    Serial.println("ACL:");
+    Serial.println(acl.needsRecovery() ? "ACL recovery required:" : "ACL:");
     for (int i = 0; i < acl.getNumClients(); i++) {
       auto c = acl.getClientByIdx(i);
       if (c->permissions == 0) continue;  // skip deleted (or guest) entries
@@ -1776,12 +1783,6 @@ void MyMesh::loop() {
     revert_radio_at = 0;                                        // clear timer
     radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
     MESH_DEBUG_PRINTLN("Radio params restored");
-  }
-
-  // is pending dirty contacts write needed?
-  if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {
-    acl.save(_fs);
-    dirty_contacts_expiry = 0;
   }
 
   // update uptime

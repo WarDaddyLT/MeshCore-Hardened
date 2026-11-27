@@ -26,7 +26,7 @@
 
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/ArduinoHelpers.h>
-#include <helpers/ClientACL.h>
+#include "RepeaterACL.h"
 #include <helpers/CommonCLI.h>
 #include <helpers/IdentityStore.h>
 #include <helpers/SimpleMeshTables.h>
@@ -132,7 +132,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t _admin_advert[MAX_TRANS_UNIT]{};
   uint8_t _admin_advert_length = 0;
   unsigned long _admin_advert_expires = 0;
-  ClientACL  acl;
+  RepeaterACL acl;
   CommonCLI _cli;
   uint8_t reply_data[MAX_PACKET_PAYLOAD];
   uint8_t reply_path[MAX_PATH_SIZE];
@@ -146,7 +146,6 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint32_t pending_discover_tag;
   unsigned long pending_discover_until;
   bool region_load_active;
-  unsigned long dirty_contacts_expiry;
 #if MAX_NEIGHBOURS
   NeighbourInfo neighbours[MAX_NEIGHBOURS];
 #endif
