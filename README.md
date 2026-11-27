@@ -172,6 +172,7 @@ Replace bracketed or angle-bracketed placeholders with real values. Type a scope
 | `rules delete <id-or-prefix>` | Removes the selected rule and retains its deletion record. Delete shared rules on their originating repeater. |
 | `rules mode <open\|restricted>` | Selects the identity policy for traffic that the repeater can attribute. |
 | `rules rate <0–600>` | Sets the shared limit per minute for forwarded group text, group data, and anonymous requests. Use `0` to disable this cap. |
+| `rules traffic type <id>` or `rules traffic category <name>` | Read or change local per-type and category forwarding policy. Actions are `allow`, `drop`, and `limit <packets-per-minute>`. |
 | `rules drops` | Shows the volatile filter, identity, and rate counters. |
 
 For a controlled blacklist check:

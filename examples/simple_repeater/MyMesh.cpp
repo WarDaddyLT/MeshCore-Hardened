@@ -466,25 +466,14 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 }
 
 bool MyMesh::shouldDropByFilter(const mesh::Packet* packet) const {
-  return savemesh::shouldDropOneByte(packet, _filter_prefs.filter_1byte || _rules.filterEnabled(RuleStore::OneByte))
+  return _rules.trafficPolicy().drops(packet->getPayloadType())
+      || savemesh::shouldDropOneByte(packet, _filter_prefs.filter_1byte || _rules.filterEnabled(RuleStore::OneByte))
       || savemesh::shouldDropData(packet, _filter_prefs.filter_data || _rules.filterEnabled(RuleStore::Data))
       || ((_filter_prefs.filter_public || _rules.filterEnabled(RuleStore::Public)) && isPublicChannelPacket(packet));
 }
 
-bool MyMesh::shouldDropByRate(const mesh::Packet* packet, ForwardBudget& budget) {
-  uint16_t limit = _rules.unknownRate();
-  if (!limit) return false;
-  uint8_t type = packet->getPayloadType();
-  if (type != PAYLOAD_TYPE_GRP_TXT && type != PAYLOAD_TYPE_GRP_DATA && type != PAYLOAD_TYPE_ANON_REQ) return false;
-  uint32_t now = millis();
-  if (now - budget.window_start >= 60000) {
-    budget.count = 0;
-    budget.window_start = now;
-  }
-  if (budget.count < limit) {
-    ++budget.count;
-    return false;
-  }
+bool MyMesh::shouldDropByRate(const mesh::Packet* packet, forward_traffic::Budget& budget) {
+  if (budget.admit(packet->getPayloadType(), _rules.trafficPolicy(), _rules.unknownRate(), millis())) return false;
   ++_rate_drops;
   return true;
 }

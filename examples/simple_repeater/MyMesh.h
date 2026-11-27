@@ -96,13 +96,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint32_t _filter_drops = 0;
   uint32_t _identity_drops = 0;
   uint32_t _rate_drops = 0;
-  struct ForwardBudget {
-    uint32_t window_start = 0;
-    uint16_t count = 0;
-  };
-  ForwardBudget _radio_forward_budget;
+  forward_traffic::Budget _radio_forward_budget;
 #ifdef WITH_BRIDGE
-  ForwardBudget _bridge_forward_budget;
+  forward_traffic::Budget _bridge_forward_budget;
 #endif
   static constexpr size_t NoticeCapacity = 32;
   struct Notice {
@@ -165,7 +161,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
   bool repairRepeaterPrefs();
   bool shouldDropByFilter(const mesh::Packet* packet) const;
-  bool shouldDropByRate(const mesh::Packet* packet, ForwardBudget& budget);
+  bool shouldDropByRate(const mesh::Packet* packet, forward_traffic::Budget& budget);
   bool shouldDropAdvert(const mesh::Packet* packet, bool signature_verified) const;
   bool shouldDenyClient(const mesh::Identity& id);
   bool neighbourChannelUsable() const;
