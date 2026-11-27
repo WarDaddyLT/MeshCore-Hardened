@@ -283,6 +283,7 @@ def test(devices, report):
         for role in REPEATERS:
             device = devices[role]
             revision = int(pairs(device.cli("rules status"))["rev"])
+            report["cleanup"][role] = "deny write not yet confirmed; inspect rules list"
             try:
                 reply = device.cli(f"rules add deny client {actor} local")
                 rule = RULE.fullmatch(reply)
@@ -294,6 +295,7 @@ def test(devices, report):
                     report["cleanup"][role] = "temporary deny state unknown; inspect rules list"
                     raise Failure(f"{role} did not confirm the deny write or its policy state.") from None
             if not rule_id:
+                report["cleanup"].pop(role)
                 raise Failure(f"{role} did not create a temporary deny rule.")
             added[role] = rule_id
             report["temporary_rules"][role] = rule_id
