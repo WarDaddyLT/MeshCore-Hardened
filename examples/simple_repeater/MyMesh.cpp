@@ -448,6 +448,11 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
     ++_filter_drops;
     return false;
   }
+  if (_rules.mode() == RuleStore::Protected && packet->getPayloadType() != PAYLOAD_TYPE_ADVERT
+      && packet != _verified_policy_forward) {
+    ++_identity_drops;
+    return false;
+  }
   if (packet->isRouteDirect() && packet->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
     if (!verifyReceivedAdvert(*packet) || !allowVerifiedAdvert(*packet, true)) return false;
   }
@@ -552,10 +557,26 @@ bool MyMesh::allowVerifiedAdvert(const mesh::Packet& packet, bool observe) {
     ++_identity_drops;
     return false;
   }
-  if (!observe || !packet.received_over_radio || subject == RuleStore::AnyDevice) return true;
 
   uint32_t stamp;
   memcpy(&stamp, packet.payload + PUB_KEY_SIZE, sizeof(stamp));
+  if (_rules.mode() == RuleStore::Protected && (subject == RuleStore::AnyDevice || decision != RuleStore::Allowed)) {
+    if (subject == RuleStore::AnyDevice || !observe || !packet.received_over_radio) {
+      ++_identity_drops;
+      return false;
+    }
+    const bool transit = packet.isRouteFlood() || packet.getPathHashCount() > 0;
+    const auto hasDecision = [this](const uint8_t* key, uint8_t storedSubject) {
+      return _rules.decide(static_cast<RuleStore::Subject>(storedSubject), key) != RuleStore::Unknown;
+    };
+    if (_probation.admit(packet.payload, subject, stamp, getRTCClock()->getCurrentTime(), uptime_millis, transit, hasDecision)) {
+      return true;
+    }
+    if (transit) ++_probation_drops;
+    return false;
+  }
+  if (!observe || !packet.received_over_radio || subject == RuleStore::AnyDevice) return true;
+
   const auto isEnrolled = [this](const uint8_t* key) {
     return _rules.decide(RuleStore::AnyDevice, key) == RuleStore::Allowed;
   };
@@ -583,7 +604,9 @@ void MyMesh::describeDevice(const char* args, char* reply) {
   const char* status = decision == RuleStore::Denied ? "denied" : decision == RuleStore::Allowed ? "allowed" : "unknown";
   const bool enrolled = _rules.decide(RuleStore::AnyDevice, key) == RuleStore::Allowed;
   const auto stats = _device_activity.stats(key, enrolled, getRTCClock()->getCurrentTime());
-  snprintf(reply, 150, "trust=%s adverts=%u limited=%u", status, stats.observations, stats.limited);
+  const int hours = decision == RuleStore::Unknown ? _probation.hoursRemaining(key, uptime_millis) : -1;
+  if (hours < 0) snprintf(reply, 150, "trust=%s adverts=%u limited=%u", status, stats.observations, stats.limited);
+  else snprintf(reply, 150, "trust=%s probation-hours=%d", status, hours);
 }
 
 bool MyMesh::shouldDenyClient(const mesh::Identity& id) {
@@ -616,6 +639,7 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 bool MyMesh::shouldExportToBridge(mesh::Packet* packet) {
   if (_prefs.disable_fwd || !_rules.forwardingAllowed() || !admitReceivedPacket(packet)
       || shouldDropByFilter(packet)) return false;
+  if (_rules.mode() == RuleStore::Protected && packet->getPayloadType() != PAYLOAD_TYPE_ADVERT) return false;
   if (packet->isRouteFlood()) {
     if (mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max, _prefs.flood_max_unscoped,
                                     _prefs.flood_max_advert)) return false;
@@ -704,7 +728,10 @@ mesh::DispatcherAction MyMesh::receivePolicyUpdate(mesh::Packet* packet) {
   getTables()->markSeen(packet);
   if (result == RuleStore::Current) return ACTION_RELEASE;
   _next_policy_commit = futureMillis(2000);
-  return routeRecvPacket(packet);
+  _verified_policy_forward = packet;
+  const auto action = routeRecvPacket(packet);
+  _verified_policy_forward = nullptr;
+  return action;
 }
 
 void MyMesh::sendPolicyUpdate() {
@@ -1149,6 +1176,7 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
 void MyMesh::onControlDataRecv(mesh::Packet* packet) {
   uint8_t type = packet->payload[0] & 0xF0;    // just test upper 4 bits
   if (type == CTL_TYPE_NODE_DISCOVER_REQ && packet->payload_len >= 6
+      && _rules.mode() != RuleStore::Protected
       && !_prefs.disable_fwd && discover_limiter.allow(rtc_clock.getCurrentTime())
       && !isHiddenNode()   // this node wishes to NOT be discoverable
   ) {
@@ -1308,6 +1336,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _filter_prefs.begin(_fs);
   acl.begin(_fs, self_id);
   _rules.begin(_fs, self_id);
+  _probation.begin(_rules.probationState(), uptime_millis);
   _room_identity_loaded = _rules.loadRoomIdentity(_room_identity)
                        && _room_identity.pub_key[0] != self_id.pub_key[0];
   // TODO: key_store.begin();
@@ -1694,7 +1723,12 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     const char* recovery_arg;
     if (matchesValue(args, "recovery") || matchesValue(args, "resume") || matchCommand(args, "recover", &recovery_arg)) {
       if (client) strcpy(reply, "Err - use USB for policy recovery");
-      else _rules.handleRecoveryCommand(args, reply);
+      else {
+        _rules.handleRecoveryCommand(args, reply);
+        if (strncmp(reply, "OK", 2) == 0 && matchCommand(args, "recover", &recovery_arg)) {
+          _probation.begin(_rules.probationState(), uptime_millis);
+        }
+      }
       return;
     }
     const char* work;
@@ -1727,10 +1761,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
           airtimeDrops += stats.airtimeDrops;
           queueDrops += stats.queueDrops;
         }
-        snprintf(reply, 150, "filter=%lu identity=%lu rate=%lu airtime=%lu queue=%lu",
+        snprintf(reply, 150, "filter=%lu identity=%lu rate=%lu airtime=%lu queue=%lu probation=%lu",
                  static_cast<unsigned long>(_filter_drops), static_cast<unsigned long>(_identity_drops),
                  static_cast<unsigned long>(_rate_drops), static_cast<unsigned long>(airtimeDrops),
-                 static_cast<unsigned long>(queueDrops));
+                 static_cast<unsigned long>(queueDrops), static_cast<unsigned long>(_probation_drops));
         return;
       }
       for (unsigned index = 0; index < forward_traffic::CategoryCount; ++index) {
@@ -1747,8 +1781,12 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     bool can_write = !client || client->isAdmin();
     if (handleSyncCommand(args, reply, !client, can_write)) return;
     bool sync_requested = false;
+    const auto previousMode = _rules.mode();
     _rules.handleCommand(args, reply, self_id, client ? &client->id : nullptr,
                          sender_timestamp, *getRNG(), can_write, can_write, sync_requested);
+    if (_rules.mode() == RuleStore::Protected && previousMode != RuleStore::Protected) {
+      while (_mgr->getOutboundTotal()) releasePacket(_mgr->removeOutboundByIdx(0));
+    }
     if (sync_requested) _sync_cursor = 0;
     return;
   }
@@ -1905,6 +1943,11 @@ void MyMesh::loop() {
   uint32_t now = millis();
   uptime_millis += now - last_millis;
   last_millis = now;
+  if (_rules.forwardingAllowed()) {
+    _probation.checkpoint(uptime_millis, [this](const probation::Snapshot& state) {
+      return _rules.saveProbation(state);
+    });
+  }
 }
 
 // To check if there is pending work

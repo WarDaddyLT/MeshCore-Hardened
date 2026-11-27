@@ -28,7 +28,7 @@ rules add deny repeater <64-hex-public-key> [scope]
 rules device <client|repeater> <64-hex-public-key>
 rules add filter 1byte|data|public on|off [scope]
 rules delete <rule-id-or-prefix>
-rules mode [normal|restricted]
+rules mode [normal|protected|restricted]
 rules rate <packets-per-minute>
 rules airtime [percent]
 rules drops [category]
@@ -37,6 +37,16 @@ rules drops [category]
 Scope defaults to `local`. Use `global:<domain>` or `region:<name>` after provisioning sync. Rule changes and explicit sync requests require physical USB or the mesh admin role. Read-only and read-write ACL users can inspect rules and status. Use full 32-hex-character rule IDs when deleting. Prefixes of at least eight hex characters work when unique across active rules and retained deletion records. A shared rule is deleted on its originating repeater. `rules list` returns one active rule per response. Pass the returned `next` value as the next cursor until the response is `End`.
 
 Normal is the default mode. It forwards stock traffic subject to the configured filters, attributable bans, and forwarding limits. An existing `open` setting reads as `normal` after upgrade, and `rules mode open` remains an alias. An existing `restricted` setting remains active and keeps its prior allowlist and enrollment behavior. Upgrade leaves the saved rule and filter settings in place.
+
+### Protected mode
+
+Use `rules mode protected` to stop unattributable transit, including stock group messages and ordinary direct packets whose source the repeater cannot verify. The repeater continues to accept locally authenticated management for approved keys. Password-based enrollment and unauthenticated discovery replies are disabled. A policy update can relay after the existing peer, signature, and scope checks succeed.
+
+Signed client and repeater adverts from approved keys can still pass subject to the ordinary forwarding limits. A fresh, verified RF advert from an unknown key starts probation at zero. The fraction of eligible adverts that may be forwarded grows linearly with elapsed uptime, reaching one-third at 24 hours, two-thirds at 48 hours, and the full probation allowance at 72 hours. An unattributable message never inherits the advert's identity. Each probation key gets at most six eligible candidates per signed minute. While the key is still on probation, admitted adverts also share six forwarding opportunities per minute. The ordinary airtime, queue and packet policies apply throughout.
+
+The repeater tracks up to 12 probation keys and reuses entries resolved by an administrator allow or deny. Freshness requires a synchronized repeater clock. Forwarding credit comes from monotonic uptime, so time offline or an adjustment to the wall clock does not fast-forward probation. New entries are saved in batches with at least a minute between writes and can forward only after their first successful save. Progress checkpoints are 15 minutes apart. A reboot can discard unsaved progress. A new key starts over. Use `rules device <role> <key>` to read whole hours remaining and `rules drops` to inspect probation drops.
+
+When an admin enters Protected, the repeater discards packets still queued for transmit. Bridge transit in Protected requires an explicitly allowed signed advert. Use `rules mode normal` to restore normal forwarding.
 
 The store supports 24 total entries, including deletion records. An update is written to the alternate snapshot and read back before the active state changes. It verifies snapshot integrity and rule signatures at boot. Retaining deletion records prevents old copies from restoring deleted rules, so new entries are rejected when the table fills. The last valid snapshot stays available when a write fails.
 
@@ -86,7 +96,7 @@ Forwarding admission limits each category to four outstanding packets in the out
 
 `rules drops` shows totals by reason. `rules drops <category>` reports airtime drops, queue drops, and the estimated airtime admitted for RF forwarding. Admission totals include frames that may later fail to transmit. Use radio counters and path evidence to validate actual RF delivery.
 
-Valid v5 and v6 rule snapshots load with the default airtime share. A v5 snapshot also defaults its type and category packet policies to allow. The next policy write uses v7. Back up policy before installing an older build that lacks this snapshot format.
+Valid v5 and v6 rule snapshots load with the default airtime share. A v5 snapshot also defaults its type and category packet policies to allow. Snapshots from v5 through v7 load with an empty probation ledger. The next policy write uses v8. Back up policy before installing an older build that lacks this snapshot format.
 
 ## Receive work and diagnostics
 

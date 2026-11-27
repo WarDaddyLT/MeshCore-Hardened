@@ -171,7 +171,7 @@ Replace bracketed or angle-bracketed placeholders with real values. Type a scope
 | `rules device <client\|repeater> <public-key>` | Shows the effective trust decision and recent signed advert counts for a full key. |
 | `rules add filter <1byte\|data\|public> <on\|off> [scope]` | Adds a scoped filter decision. |
 | `rules delete <id-or-prefix>` | Removes the selected rule and retains its deletion record. Delete shared rules on their originating repeater. |
-| `rules mode [normal\|restricted]` | Reads or selects the forwarding mode. `open` remains an alias for `normal`. |
+| `rules mode [normal\|protected\|restricted]` | Reads or selects the forwarding mode. Protected blocks unattributable transit and applies a 72-hour probation to fresh signed keys. `open` remains an alias for `normal`. |
 | `rules rate <0–600>` | Sets an independent packet count limit per minute for each of group text, group data, and anonymous requests. Use `0` to disable this cap. |
 | `rules traffic type <id>` or `rules traffic category <name>` | Read or change local per-type and category forwarding policy. Actions are `allow`, `drop`, and `limit <packets-per-minute>`. |
 | `rules airtime [0–100]` | Reads or sets the percentage of the configured radio duty cycle that each RF forwarding category may use over time. Defaults to 25%. Use `0` to disable the per-category airtime share. |

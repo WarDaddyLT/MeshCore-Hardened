@@ -9,7 +9,8 @@ constexpr const char* Pending = "/hardened_rules_tmp";
 constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
 constexpr const char* Provisioned = "/hardened_rules_provisioned";
 constexpr const char* ForwardingHold = "/hardened_rules_hold";
-constexpr uint8_t Magic[] = {'M', 'C', 'H', 7};
+constexpr uint8_t Magic[] = {'M', 'C', 'H', 8};
+constexpr uint8_t LegacyAirtimeMagic[] = {'M', 'C', 'H', 7};
 constexpr uint8_t LegacyTrafficMagic[] = {'M', 'C', 'H', 6};
 constexpr uint8_t LegacyRulesMagic[] = {'M', 'C', 'H', 5};
 constexpr char SigningDomain[] = "MeshCore Hardened policy v1";
@@ -208,26 +209,30 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
   uint8_t legacyDigest[sizeof(snapshot.digest)];
   constexpr size_t rulesPrefix = offsetof(Snapshot, traffic);
   constexpr size_t trafficPrefix = offsetof(Snapshot, airtime_share);
+  constexpr size_t airtimePrefix = offsetof(Snapshot, probation);
   const bool hasTraffic = size == trafficPrefix + sizeof(legacyDigest);
-  const size_t legacyPrefix = hasTraffic ? trafficPrefix : rulesPrefix;
-  const auto* legacyMagic = hasTraffic ? LegacyTrafficMagic : LegacyRulesMagic;
+  const bool hasAirtime = size == airtimePrefix + sizeof(legacyDigest);
+  const size_t legacyPrefix = hasAirtime ? airtimePrefix : hasTraffic ? trafficPrefix : rulesPrefix;
+  const auto* legacyMagic = hasAirtime ? LegacyAirtimeMagic : hasTraffic ? LegacyTrafficMagic : LegacyRulesMagic;
   bool complete = size == legacyPrefix + sizeof(legacyDigest) && file.read(bytes, legacyPrefix) == legacyPrefix
       && file.read(legacyDigest, sizeof(legacyDigest)) == sizeof(legacyDigest);
   file.close();
-  if (!complete || memcmp(snapshot.magic, legacyMagic, sizeof(Magic)) != 0) return false;
+  if (!complete || memcmp(snapshot.magic, legacyMagic, sizeof(Magic)) != 0 || snapshot.mode > LegacyRestricted) return false;
 
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, legacyPrefix);
   if (memcmp(legacyDigest, snapshot.digest, sizeof(legacyDigest)) != 0) return false;
   memcpy(snapshot.magic, Magic, sizeof(Magic));
-  if (!hasTraffic) snapshot.traffic = {};
-  snapshot.airtime_share = forward_traffic::DefaultAirtimeShare;
+  if (!hasTraffic && !hasAirtime) snapshot.traffic = {};
+  if (!hasAirtime) snapshot.airtime_share = forward_traffic::DefaultAirtimeShare;
+  snapshot.probation = {};
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, offsetof(Snapshot, digest));
   return true;
 }
 
 bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
   if (memcmp(snapshot.magic, Magic, sizeof(Magic)) != 0
-      || snapshot.mode > LegacyRestricted || snapshot.count > Capacity || snapshot.room_enabled > 1 || !snapshot.traffic.valid()
+      || snapshot.mode > Protected || snapshot.count > Capacity || snapshot.room_enabled > 1 || !snapshot.traffic.valid()
+      || !snapshot.probation.valid()
       || snapshot.airtime_share > 100
       || snapshot.room_name[sizeof(snapshot.room_name) - 1]
       || snapshot.domain[ScopeNameSize - 1] || snapshot.region[ScopeNameSize - 1]) return false;
@@ -538,6 +543,22 @@ RuleStore::Decision RuleStore::decide(Subject subject, const uint8_t* key) const
   return decision;
 }
 
+const char* RuleStore::modeName() const {
+  switch (mode()) {
+    case Protected: return "protected";
+    case LegacyRestricted: return "restricted";
+    default: return "normal";
+  }
+}
+
+bool RuleStore::saveProbation(const probation::Snapshot& state) {
+  if (!_ready || _forwarding_hold || decodeRevision(_state.revision) == UINT32_MAX || !state.valid()) return false;
+  _candidate = _state;
+  _candidate.probation = state;
+  encodeRevision(_candidate.revision, decodeRevision(_state.revision) + 1);
+  return commit();
+}
+
 bool RuleStore::filterEnabled(Subject subject) const {
   const Rule* latest = nullptr;
   for (size_t i = 0; i < _state.count; i++) {
@@ -746,9 +767,10 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     changed->deleted = 1;
   } else if (savemesh::matchCommand(command, "mode", &arg)) {
     if (savemesh::matchesValue(arg, "restricted")) _candidate.mode = LegacyRestricted;
+    else if (savemesh::matchesValue(arg, "protected")) _candidate.mode = Protected;
     else if (savemesh::matchesValue(arg, "normal") || savemesh::matchesValue(arg, "open")) _candidate.mode = Normal;
     else {
-      strcpy(reply, "Err - use normal or restricted");
+      strcpy(reply, "Err - use normal, protected or restricted");
       return;
     }
     if (_candidate.mode == _state.mode) {
