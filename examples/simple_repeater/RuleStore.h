@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <helpers/IdentityStore.h>
 #include "ForwardTraffic.h"
+#include "Probation.h"
 
 class RuleStore {
 public:
@@ -16,7 +17,7 @@ public:
   enum Decision : uint8_t { Unknown, Allowed, Denied };
   enum Scope : uint8_t { Local, Region, Global };
   // Keep the on-disk values used by open and restricted in v5–v7 snapshots.
-  enum Mode : uint8_t { Normal = 0, LegacyRestricted = 1 };
+  enum Mode : uint8_t { Normal = 0, LegacyRestricted = 1, Protected = 2 };
 
   struct Rule {
     uint8_t id[IdSize];
@@ -40,7 +41,9 @@ public:
   bool forwardingAllowed() const { return _ready && !_forwarding_hold; }
   void handleRecoveryCommand(const char* command, char* reply);
   Mode mode() const { return static_cast<Mode>(_state.mode); }
-  const char* modeName() const { return mode() == Normal ? "normal" : "restricted"; }
+  const char* modeName() const;
+  const probation::Snapshot& probationState() const { return _state.probation; }
+  bool saveProbation(const probation::Snapshot& state);
   uint16_t unknownRate() const;
   uint8_t airtimeShare() const { return _state.airtime_share; }
   const forward_traffic::Policy& trafficPolicy() const { return _state.traffic; }
@@ -87,6 +90,7 @@ private:
     Rule rules[Capacity];
     forward_traffic::Policy traffic;
     uint8_t airtime_share = forward_traffic::DefaultAirtimeShare;
+    probation::Snapshot probation;
     uint8_t digest[32];
   };
 

@@ -95,9 +95,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   FilterPrefs _filter_prefs;
   RuleStore _rules;
   DeviceActivity _device_activity;
+  probation::Ledger _probation;
   uint32_t _filter_drops = 0;
   uint32_t _identity_drops = 0;
   uint32_t _rate_drops = 0;
+  uint32_t _probation_drops = 0;
   uint32_t _frame_drops = 0;
   uint32_t _delayed_drops = 0;
   uint32_t _invalid_adverts = 0;
@@ -137,6 +139,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   size_t _sync_cursor = RuleStore::Capacity;
   unsigned long _next_policy_tx = 0;
   unsigned long _next_policy_commit = 0;
+  const mesh::Packet* _verified_policy_forward = nullptr;
   mesh::LocalIdentity _room_identity;
   bool _room_identity_loaded = false;
   struct RoomSession {

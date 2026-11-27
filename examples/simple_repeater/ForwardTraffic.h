@@ -11,6 +11,10 @@ constexpr uint8_t DefaultAirtimeShare = 25;
 constexpr unsigned MaxQueuedPerCategory = 4;
 constexpr int ReservedFreePackets = 3;
 
+inline bool recentSignedStamp(uint32_t stamp, uint32_t now) {
+  return stamp && (stamp <= now ? now - stamp <= 60 : stamp - now <= 15);
+}
+
 enum Category : uint8_t { GroupText, GroupData, DirectText, Discovery, Anonymous, Routing, Management, Other, CategoryCount };
 
 constexpr const char* CategoryNames[] = {
