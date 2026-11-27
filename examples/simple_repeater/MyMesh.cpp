@@ -102,13 +102,13 @@ uint8_t MyMesh::handleLoginReq(const mesh::Identity& sender, const uint8_t* secr
 
   if (!client || data[0] != 0) {
     const char* password = reinterpret_cast<const char*>(data);
-    // Open is the current CLI equivalent of Normal. Strict modes retain the ACL
-    // login path and prevent password-based enrollment or promotion.
+    // Existing administrators can sign in in either mode. Password-based
+    // enrollment and promotion are available in Normal.
     bool admin_password_matches = _prefs.password[0]
         && strncmp(password, _prefs.password, sizeof(_prefs.password)) == 0;
     if (admin_password_matches) {
       if (!client || !client->isAdmin()) {
-        if (!_rules.forwardingAllowed() || _rules.restricted() || acl.needsRecovery()) return 0;
+        if (!_rules.forwardingAllowed() || _rules.mode() != RuleStore::Normal || acl.needsRecovery()) return 0;
         uint8_t permissions = client ? client->permissions & ~PERM_ACL_ROLE_MASK : 0;
         permissions |= PERM_ACL_ADMIN;
         if (!acl.updatePermissions(self_id, sender.pub_key, PUB_KEY_SIZE, permissions)) return 0;
@@ -548,7 +548,7 @@ bool MyMesh::allowVerifiedAdvert(const mesh::Packet& packet, bool observe) {
   }
   const auto decision = _rules.decide(subject, packet.payload);
   if (decision == RuleStore::Denied || (subject != RuleStore::AnyDevice
-      && decision == RuleStore::Unknown && _rules.restricted())) {
+      && decision == RuleStore::Unknown && _rules.mode() == RuleStore::LegacyRestricted)) {
     ++_identity_drops;
     return false;
   }
@@ -589,7 +589,7 @@ void MyMesh::describeDevice(const char* args, char* reply) {
 bool MyMesh::shouldDenyClient(const mesh::Identity& id) {
   auto decision = _rules.decide(RuleStore::Client, id.pub_key);
   if (decision == RuleStore::Denied) return true;
-  if (decision == RuleStore::Allowed || !_rules.restricted()) return false;
+  if (decision == RuleStore::Allowed || _rules.mode() == RuleStore::Normal) return false;
   auto client = acl.getClient(id.pub_key, PUB_KEY_SIZE);
   return !client || (client->permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST;
 }
