@@ -1,12 +1,12 @@
 # Four-device actor bench
 
-The actor scenario checks whether two Hardened repeaters drop a banned device's signed advert while continuing to forward an ordinary, non-banned companion's advert. ADMIN and ACTOR both use stock MeshCore Companion firmware. The run transmits five ordinary adverts and uses the repeaters' USB consoles to apply and remove two temporary local denies.
+The actor scenario checks whether two Hardened repeaters drop a banned device's signed advert while continuing to forward an ordinary, non-banned companion's advert. It uses the standard MeshCore Companion protocol on ADMIN and stock MeshCore USB Companion firmware on ACTOR. The run transmits five ordinary adverts and uses the repeaters' USB consoles to apply and remove two temporary local denies.
 
 | Role | Device | Required firmware |
 | --- | --- | --- |
 | R1 | RAK 1W | MeshCore Hardened repeater with `rules device` |
 | R2 | ThinkNode M5 | MeshCore Hardened repeater with `rules device` |
-| ADMIN | Wio Tracker e-ink | Stock MeshCore Companion with working USB Companion protocol |
+| ADMIN | Wio Tracker e-ink | USB-capable admin bench build of MeshCore Companion |
 | ACTOR | T-Echo Lite Kit | Stock MeshCore USB Companion |
 
 ## Run from CLion
@@ -20,6 +20,8 @@ From the repository root in CLion's Terminal, with the four USB devices connecte
 ```
 
 The first `prepare` installs the pinned dependency in `.venv/hil`, writes the four verified public-key pins to `hil_config.local.json`, and checks the bench. On another checkout, fill in the USB selectors in that local file first. Existing pins must match the attached devices. `run` repeats preflight before transmitting and writes its reports to `out/hil/actor.*`. Use `bench.sh preflight` for a read-only readiness check. Use `bench.sh build` to compile the installable RAK 1W and ThinkNode M5 images with PlatformIO. The build command only compiles, and firmware installation is a separate operation.
+
+Use `./scripts/hil/bench.sh build-admin` to compile `.pio/build/WioTrackerL1Eink_hil_admin_usb/firmware.zip`. This test profile enables USB alongside BLE using the existing Companion code and board settings. Close any connected phone app before using the admin device on the USB bench. Record the image hash and source commit after authorized installation. Stock Android interoperability is verified separately with the stock app and firmware.
 
 To run directly with a Python Run Configuration:
 

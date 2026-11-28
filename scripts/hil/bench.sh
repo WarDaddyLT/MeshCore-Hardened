@@ -11,8 +11,9 @@ if [ "$#" -gt 0 ]; then shift; fi
 case "$action" in
     help|-h|--help)
         cat <<'HELP'
-Usage: scripts/hil/bench.sh <build|prepare|list|preflight|run> [runner options]
+Usage: scripts/hil/bench.sh <build|build-admin|prepare|list|preflight|run> [runner options]
   build      Compile the RAK 1W and ThinkNode M5 repeater images.
+  build-admin Compile the USB-capable Wio Tracker e-ink admin bench image.
   prepare    Install test dependencies, pin the four USB keys, and check preflight.
   list       List USB devices.
   preflight  Check the pinned USB identities and settings without transmitting.
@@ -29,6 +30,15 @@ HELP
         printf '%s\n' \
             ".pio/build/RAK_3401_repeater/firmware.zip" \
             ".pio/build/ThinkNode_M5_Repeater/firmware.bin"
+        exit 0
+        ;;
+    build-admin)
+        if [ "$#" -ne 0 ]; then
+            printf '%s\n' "The build-admin action takes no arguments." >&2
+            exit 2
+        fi
+        "${MESHCORE_HIL_PIO:-pio}" run -e WioTrackerL1Eink_hil_admin_usb
+        printf '%s\n' ".pio/build/WioTrackerL1Eink_hil_admin_usb/firmware.zip"
         exit 0
         ;;
     prepare|list|preflight|run) ;;
