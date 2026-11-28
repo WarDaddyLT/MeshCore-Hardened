@@ -316,7 +316,7 @@ def find_unacknowledged_deny(device, key, revision):
     return find_unacknowledged_rule(device, "deny", key, revision)
 
 
-def find_unacknowledged_rule(device, expected_kind, key, revision):
+def find_unacknowledged_rule(device, expected_kind, key, revision, expected_scope="local"):
     # Only recover a lost acknowledgment when exactly one policy change
     # occurred and the newly visible rule matches this isolated trial.
     status = pairs(device.cli("rules status"))
@@ -334,7 +334,7 @@ def find_unacknowledged_rule(device, expected_kind, key, revision):
         next_cursor = int(next_field.removeprefix("next="))
         if next_cursor <= cursor:
             raise Failure(f"{device.name} returned an invalid rule cursor.")
-        if (kind, subject, value.lower(), scope) == (expected_kind, "client", key, "local"):
+        if (kind, subject, value.lower(), scope) == (expected_kind, "client", key, expected_scope):
             matches.append(rule_id)
         cursor = next_cursor
     if len(matches) != 1 or not re.fullmatch(r"[0-9a-fA-F]{32}", matches[0]):
@@ -614,6 +614,92 @@ def test_sync(devices, report):
             raise Failure("Restore signed Normal policy on R1 and confirm its application on R2.") from None
 
 
+def test_shared_rule_recovery(devices, report):
+    origin, peer = devices["R1"], devices["R2"]
+    actor = devices["ACTOR"].key
+    domain = pairs(origin.cli("rules sync status")).get("domain", "")
+    if not re.fullmatch(r"[a-z0-9_-]{1,15}", domain):
+        raise Skip("R1 needs a configured test policy domain.")
+    peer_sync = pairs(peer.cli("rules sync status"))
+    if peer_sync.get("domain") != domain:
+        raise Skip("R1 and R2 need the same preconfigured test policy domain.")
+    if pairs(peer.cli(f"rules authority {origin.key}")).get("global") != "allowed":
+        raise Skip("R2 needs the R1 global publishing grant.")
+
+    links = ((origin, peer), (peer, origin))
+    for repeater, other in links:
+        status = pairs(repeater.cli(f"rules peer status domain {other.key}"))
+        if status.get("peer") != "authenticated":
+            raise Skip("Establish the authenticated domain session on both repeaters before this case.")
+    original = {device.name: pairs(device.cli(f"rules device client {actor}")).get("trust")
+                for device, _ in links}
+    if any(trust not in ("allowed", "unknown") for trust in original.values()):
+        raise Skip("The shared-rule case needs ACTOR to start without a deny.")
+
+    def reconnect():
+        if not origin.cli(f"rules peer connect domain {peer.key}").startswith("OK"):
+            raise Failure("R1 did not start re-establishing the domain session.")
+        for device, other in links:
+            wait_for_policy(device, f"rules peer status domain {other.key}", {"peer": "authenticated"})
+
+    def check_deleted():
+        for device, _ in links:
+            wait_for_policy(device, f"rules device client {actor}", {"trust": original[device.name]})
+            if device.cli(f"rules show {rule_id}") != "Err - no active rule":
+                raise Failure(f"{device.name} still lists the temporary shared rule.")
+
+    scope = f"global:{domain}"
+    revision = int(pairs(origin.cli("rules status"))["rev"])
+    rule_id = None
+    report["cleanup"]["shared deny"] = "unconfirmed; inspect R1 global rules"
+    try:
+        try:
+            reply = origin.cli(f"rules add deny client {actor} {scope}")
+        except (Failure, OSError, serial.SerialException):
+            reply = ""
+        match = RULE.fullmatch(reply)
+        rule_id = match[1] if match else find_unacknowledged_rule(origin, "deny", actor, revision, scope)
+        if not rule_id:
+            report["cleanup"].pop("shared deny")
+            raise Failure("R1 did not create the temporary shared deny.")
+        report["temporary_rules"]["shared deny"] = rule_id
+        for device, _ in links:
+            wait_for_policy(device, f"rules device client {actor}", {"trust": "denied"})
+            if rule_id not in device.cli(f"rules show {rule_id}"):
+                raise Failure(f"{device.name} did not commit the expected shared deny.")
+        sample(devices, "ACTOR", "ADMIN", False, report)
+
+        for device, other in links:
+            if not device.cli(f"rules peer disconnect domain {other.key}").startswith("OK"):
+                raise Failure(f"{device.name} did not disconnect the domain session.")
+            if pairs(device.cli(f"rules peer status domain {other.key}")).get("peer") != "offline":
+                raise Failure(f"{device.name} still reports the domain session active.")
+        if not origin.cli(f"rules delete {rule_id}").startswith("OK"):
+            raise Failure("R1 did not confirm deletion during the session outage.")
+        if rule_id not in peer.cli(f"rules show {rule_id}"):
+            raise Failure("R2 did not retain its last committed deny during the session outage.")
+        reconnect()
+        check_deleted()
+        report["cleanup"]["shared deny"] = "removed"
+        report["samples"].append({"type": "shared-rule session recovery", "rule_id": rule_id,
+                                  "peer_retained_policy_offline": True, "both_deleted_after_reconnect": True})
+    finally:
+        if rule_id and report["cleanup"]["shared deny"] != "removed":
+            report["cleanup"]["shared deny"] = f"inspect R1 and R2 after deleting {rule_id} on R1"
+            try:
+                if origin.cli(f"rules show {rule_id}") != "Err - no active rule":
+                    if not origin.cli(f"rules delete {rule_id}").startswith("OK"):
+                        raise Failure("temporary shared deny not removed on R1")
+                for device, other in links:
+                    device.cli(f"rules peer disconnect domain {other.key}")
+                reconnect()
+                check_deleted()
+                report["cleanup"]["shared deny"] = "removed"
+            except (Failure, KeyError, OSError, serial.SerialException):
+                raise Failure("Temporary shared deny cleanup was not verified. See the report.") from None
+    sample(devices, "ACTOR", "ADMIN", True, report)
+
+
 def preflight(devices, config):
     keys = [devices[role].key for role in ROLES]
     if len(set(keys)) != 4 or keys[0][:2] == keys[1][:2]:
@@ -694,9 +780,10 @@ SCENARIOS = {
     "filtering": (test_filtering, "Public filter forwarding, drops, unaffected adverts, and cleanup verified."),
     "security": (test_modes, "Protected and Locked admission, legitimate forwarding, and cleanup verified."),
     "sync": (test_sync, "Signed subnet propagation, peer confirmation, and Normal restore verified."),
+    "shared": (test_shared_rule_recovery, "Signed shared rule, outage retention, and deletion convergence verified."),
 }
 
-REMAINING = ("remaining ACL cases", "complete filter regression", "shared rules, deletion and onboarding",
+REMAINING = ("remaining ACL cases", "complete filter regression", "physical partition and onboarding",
              "stock Android and room identity", "signed neighbour notices", "baseline comparison")
 
 
@@ -727,7 +814,7 @@ def main():
     actions.add_argument("--pin", action="store_true", help="Pin verified USB identities in the private config.")
     actions.add_argument("--preflight", action="store_true", help="Check bench prerequisites without transmitting.")
     actions.add_argument("--smoke", action="store_true", help="Run the five-advert deny and cleanup scenario.")
-    actions.add_argument("--suite", choices=("actor", "acl", "filtering", "security", "sync", "identity"))
+    actions.add_argument("--suite", choices=(*SCENARIOS, "identity"))
     actions.add_argument("--all", action="store_true", help="Run implemented live scenarios and record remaining coverage.")
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--report", type=Path, default=Path("out/hil/actor"))
