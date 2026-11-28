@@ -18,9 +18,10 @@ from run import (APP_START, CHANNEL_INFO, CONFIG, GET_CHANNEL, REPEATERS, ROLES,
 RADIO = [869618, 62500, 8, 8]
 SCOPE = b"hardened"
 SCOPE_KEY = sha256(b"#" + SCOPE).digest()[:16]
-CHANNEL = b"Hardened Bench"
-NAMES = {"R1": "Hardened R1 RAK", "R2": "Hardened R2 M5",
-         "ADMIN": "Hardened ADMIN", "ACTOR": "Hardened ACTOR"}
+CHANNEL = b"Bench Private"
+PREVIOUS_CHANNEL = b"Hardened Bench"
+NAMES = {"R1": "Bench R1", "R2": "Bench R2",
+         "ADMIN": "Bench Client A", "ACTOR": "Bench Client B"}
 SET_NAME = 8
 SET_RADIO = 11
 SET_CHANNEL = 32
@@ -53,27 +54,45 @@ def observer_secret(path):
 def set_private_channel(device, key):
     empty = None
     selected = None
-    for slot in range(1, 40):
-        try:
-            record = device.request(bytes((GET_CHANNEL, slot)), CHANNEL_INFO)
-        except Failure:
-            break
-        if len(record) < 50 or record[1] != slot:
-            raise Failure(f"{device.name} returned a malformed channel slot.")
+    for slot in range(1, device.details["channel_slots"]):
+        record = read_channel_slot(device, slot)
         name = record[2:34].split(b"\0", 1)[0]
-        if name == CHANNEL:
+        if name == CHANNEL or (name == PREVIOUS_CHANNEL and record[34:50] == key):
             selected = slot
             break
         if empty is None and not name and not any(record[34:50]):
             empty = slot
     slot = selected if selected is not None else empty
     if slot is None:
-        raise Failure(f"{device.name} needs a free slot for Hardened Bench.")
+        raise Failure(f"{device.name} needs a free slot for Bench Private.")
     device.request(bytes((SET_CHANNEL, slot)) + CHANNEL.ljust(32, b"\0") + key, 0)
     record = device.request(bytes((GET_CHANNEL, slot)), CHANNEL_INFO)
     if record[2:34].split(b"\0", 1)[0] != CHANNEL or record[34:50] != key:
         raise Failure(f"{device.name} did not verify the shared private channel.")
     return slot
+
+
+def read_channel_slot(device, slot):
+    record = device.request(bytes((GET_CHANNEL, slot)), CHANNEL_INFO)
+    if len(record) < 50 or record[1] != slot:
+        raise Failure(f"{device.name} returned malformed channel slot {slot}.")
+    return record
+
+
+def occupied_channel_slots(device):
+    for slot in range(device.details["channel_slots"]):
+        record = read_channel_slot(device, slot)
+        if record[2] or any(record[34:50]):
+            yield slot
+
+
+def delete_other_channels(device, keep):
+    other = [slot for slot in occupied_channel_slots(device) if slot != keep]
+    for slot in other:
+        device.request(bytes((SET_CHANNEL, slot)) + bytes(48), 0)
+    if list(occupied_channel_slots(device)) != [keep]:
+        raise Failure(f"{device.name} did not verify a private-only channel table.")
+    print(f"{device.name}: retained the private test channel and cleared {len(other)} other channel(s).")
 
 
 def self_info(device):
@@ -146,13 +165,17 @@ def check_channel(devices, slot):
     print("ACTOR queued the private channel check. Both repeaters recorded one flood TX.")
 
 
-def setup(config_path, observer, actor_serial, actor_name, images, check):
+def setup(config_path, observer, actor_serial, actor_name, images, check, anonymize, private_only):
     if config_path.name != "hil_config.local.json":
         raise Failure("Use a private config named hil_config.local.json.")
     config = json.loads(config_path.read_text())
     if actor_serial:
         config["roles"]["ACTOR"] = {"serial_number": actor_serial, "display_name": actor_name}
+    if anonymize:
+        for role, name in NAMES.items():
+            config["roles"][role]["display_name"] = name
     names = {role: config["roles"][role].get("display_name", NAMES[role]) for role in ROLES}
+    private_only = private_only or config.get("private_channel_only") is True
     for role, name in names.items():
         if not re.fullmatch(r"[A-Za-z0-9 _.-]{1,30}", name):
             raise Failure(f"{role} needs a short ASCII device name.")
@@ -181,6 +204,8 @@ def setup(config_path, observer, actor_serial, actor_name, images, check):
                     reboot.append(role)
             else:
                 slots[role] = configure_companion(device, names[role], key)
+                if private_only:
+                    delete_other_channels(device, slots[role])
         for role in reboot:
             devices[role].usb.write(b"reboot\r")
             devices[role].usb.flush()
@@ -199,14 +224,22 @@ def setup(config_path, observer, actor_serial, actor_name, images, check):
                 require_cli(device, "get flood.advert.interval", "> 0")
                 require_cli(device, "get dutycycle", "> 10.0%")
                 require_cli(device, "get repeat", "> on")
+            elif private_only and list(occupied_channel_slots(device)) != [slots[role]]:
+                raise Failure(f"{role} channel table differs after reopening USB.")
             print(f"{role}: {names[role]} · {device.details['board']} · {device.details['version']}")
         config["bench_scope"] = SCOPE.decode()
         config["bench_channel_slots"] = slots
         config["direct_adverts_only"] = True
+        if private_only:
+            config["private_channel_only"] = True
         pin_keys(config_path, devices, config)
         preflight(devices, config)
         if check:
             check_channel(devices, slots["ACTOR"])
+    contents = observer.read_text()
+    updated = contents.replace("Channel: Hardened Bench", "Channel: Bench Private")
+    if updated != contents:
+        observer.write_text(updated)
     print(f"Four-device setup verified. Private observer settings are in {observer}.")
 
 
@@ -217,6 +250,8 @@ def main():
     parser.add_argument("--actor-serial", help="Replace the ACTOR with this exact USB serial")
     parser.add_argument("--actor-name", help="Verify and preserve this existing name on a replacement ACTOR")
     parser.add_argument("--record-image", action="append", nargs=3, metavar=("ROLE", "COMMIT", "PATH"), default=[])
+    parser.add_argument("--anonymize", action="store_true", help="Use neutral names for all four devices")
+    parser.add_argument("--private-only", action="store_true", help="Delete all other channels from the two bench companions")
     parser.add_argument("--check-channel", action="store_true", help="Send one ordinary private ACTOR test message")
     parser.add_argument("--isolated-rf", action="store_true", help="Confirm the RF bench is isolated")
     args = parser.parse_args()
@@ -225,7 +260,8 @@ def main():
     if bool(args.actor_serial) != bool(args.actor_name):
         parser.error("--actor-serial and --actor-name must be supplied together")
     try:
-        setup(args.config, args.observer, args.actor_serial, args.actor_name, args.record_image, args.check_channel)
+        setup(args.config, args.observer, args.actor_serial, args.actor_name, args.record_image, args.check_channel,
+              args.anonymize, args.private_only)
     except (Failure, Skip, KeyError, ValueError, OSError, serial.SerialException) as error:
         parser.exit(2, f"Bench setup incomplete: {error}\n")
 

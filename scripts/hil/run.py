@@ -290,6 +290,7 @@ class Device:
                 "board": info[20:60].split(b"\0", 1)[0].decode("ascii", "replace"),
                 "version": info[60:80].split(b"\0", 1)[0].decode("ascii", "replace"),
                 "radio": list(struct.unpack_from("<IIBB", state, 48)),
+                "channel_slots": info[3],
             }
             if len(info) > 80 and info[80]:
                 raise Skip(f"{self.name} has companion repeating enabled.")
@@ -1035,11 +1036,13 @@ REMAINING = ("remaining ACL cases", "complete filter regression", "physical part
 FLOOD_ADVERT_SUITES = {"actor", "filtering", "security", "shared", "onboarding-manual", "onboarding-peer"}
 
 
-def run_scenarios(devices, report, selected, direct_adverts_only=False):
+def run_scenarios(devices, report, selected, direct_adverts_only=False, private_channel_only=False):
     for name in selected:
         result = {"name": name, "samples": [], "temporary_rules": {}, "cleanup": {}}
         callback, passed = (SCENARIOS | PREPARED_SCENARIOS)[name]
         try:
+            if private_channel_only and name == "filtering":
+                raise Skip("The fixture allows private channels only.")
             if direct_adverts_only and name in FLOOD_ADVERT_SUITES:
                 raise Skip("This suite requires flood adverts. The fixture allows direct adverts only.")
             callback(devices, result)
@@ -1101,6 +1104,8 @@ def main():
         if not args.config.is_file():
             raise Skip("Copy hil_config.example.json to your local config and fill in the USB selectors.")
         config = json.loads(args.config.read_text())
+        if config.get("private_channel_only") is True and args.suite == "quiet":
+            raise Skip("This quiet suite requires the Public channel. The fixture allows private channels only.")
         with ExitStack() as stack:
             devices = {}
             for role, port in select_ports(config).items():
@@ -1158,7 +1163,8 @@ def main():
                     report["isolated_rf"] = True
                     try:
                         run_scenarios(devices, report, selected,
-                                      direct_adverts_only=config.get("direct_adverts_only") is True)
+                                      direct_adverts_only=config.get("direct_adverts_only") is True,
+                                      private_channel_only=config.get("private_channel_only") is True)
                         status = "PASS"
                         if any(case["status"] == "FAIL" for case in report["cases"]):
                             status = "FAIL"

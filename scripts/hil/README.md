@@ -7,7 +7,7 @@ The actor scenario checks whether two Hardened repeaters drop a banned device's 
 | R1 | RAK 1W | MeshCore Hardened repeater with `rules device` |
 | R2 | ThinkNode M5 | MeshCore Hardened repeater with `rules device` |
 | ADMIN | Wio Tracker L1 Pro e-ink | USB-capable admin bench build of MeshCore Companion |
-| ACTOR | Wio Tracker L1 OLED (Raigardas) | Stock USB Companion protocol |
+| ACTOR | Wio Tracker L1 OLED | Stock USB Companion protocol |
 
 ## Run from CLion
 
@@ -51,7 +51,9 @@ From CLion's Terminal, select the four connected ports in the local config and r
 ./scripts/hil/bench.sh setup --observer /path/outside/the/repository/hardened-bench.txt
 ```
 
-The command checks and pins the four USB identities, sets EU/UK (Narrow) and the `hardened` flood scope, enables repeater forwarding for that scope, disables periodic repeater adverts, and shares or reuses a private **Hardened Bench** channel on the companions. Set optional `display_name` in each role to choose its bench name. The observer file contains the private channel key and is restricted to its owner. Firmware installation is separate from setup.
+The command checks and pins the four USB identities, sets EU/UK (Narrow) and the `hardened` flood scope, enables repeater forwarding for that scope, disables periodic repeater adverts, and shares or reuses a private **Bench Private** channel on the companions. Set optional `display_name` in each role to choose its bench name. The observer file contains the private channel key and is restricted to its owner. Firmware installation is separate from setup.
+
+Use `--anonymize` to renew the neutral display names on the four devices. Add `--private-only` to clear all other channels from the two bench companions. This choice is saved in the fixture. Suites that require Public traffic report SKIP with a private-only fixture.
 
 The setup records the direct-adverts-only preference in the local fixture. Suites that require repeated signed adverts report SKIP under that preference. To send one ordinary scoped private ACTOR message for an observer, add `--check-channel --isolated-rf`. This checks the repeaters' TX counters and leaves the observer's inbox untouched.
 
