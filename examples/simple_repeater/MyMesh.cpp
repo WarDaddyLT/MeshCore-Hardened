@@ -416,7 +416,7 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
-  if (_prefs.disable_fwd || !_rules.forwardingAllowed()) return false;
+  if (_prefs.disable_fwd || !_rules.transitAllowed()) return false;
   if (packet->isRouteFlood()
       && mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max, _prefs.flood_max_unscoped, _prefs.flood_max_advert)) {
     return false;
@@ -455,6 +455,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 }
 
 bool MyMesh::admitForwardedPacket(const mesh::Packet* packet) {
+  if (!_rules.transitAllowed()) return false;
   const int length = packet->getRawLength();
   if (length > MAX_TRANS_UNIT) return false;
 
@@ -638,7 +639,7 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 
 #ifdef WITH_BRIDGE
 bool MyMesh::shouldExportToBridge(mesh::Packet* packet) {
-  if (_prefs.disable_fwd || !_rules.forwardingAllowed() || !admitReceivedPacket(packet)
+  if (_prefs.disable_fwd || !_rules.transitAllowed() || !admitReceivedPacket(packet)
       || shouldDropByFilter(packet)) return false;
   if (_rules.strictTransit() && packet->getPayloadType() != PAYLOAD_TYPE_ADVERT) return false;
   if (packet->isRouteFlood()) {
@@ -831,6 +832,21 @@ bool MyMesh::handleSyncCommand(const char* command, char* reply, bool usb, bool 
 
 bool MyMesh::handleAuthorityCommand(const char* command, char* reply, bool usb, bool can_write) {
   const char* args;
+  if (matchCommand(command, "onboarding", &args)) {
+    const bool wasOnboarding = _rules.onboarding();
+    if (!*args) {
+      const auto* name = _rules.scopeName(RuleStore::Subnet);
+      const char* state = !*name ? "unmanaged" : _rules.onboarding() ? "pending" : "active";
+      snprintf(reply, 150, "subnet=%s onboarding=%s transit=%s", *name ? name : "none", state,
+               _rules.transitAllowed() && !_prefs.disable_fwd ? "available" : "held");
+    } else if (!usb || !matchesValue(args, "start") || !_rules.startOnboarding()) {
+      strcpy(reply, "Err - use rules onboarding start over USB with a configured subnet");
+    } else {
+      if (!wasOnboarding) clearOutboundQueue();
+      strcpy(reply, "OK - onboarding pending; transit held");
+    }
+    return true;
+  }
   if (matchCommand(command, "subnet", &args)) {
     if (!*args) {
       const auto* name = _rules.scopeName(RuleStore::Subnet);
@@ -842,6 +858,7 @@ bool MyMesh::handleAuthorityCommand(const char* command, char* reply, bool usb, 
         for (auto& session : _policy_peers) {
           if (session.context() == PolicyPeerSession::Context::Subnet) session.reset();
         }
+        clearOutboundQueue();
       }
       strcpy(reply, ok ? "OK" : "Err - use USB with an unused valid subnet name");
     }
@@ -1871,7 +1888,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     _rules.handleCommand(args, reply, self_id, client ? &client->id : nullptr,
                          sender_timestamp, *getRNG(), can_write, can_write, sync_requested, uptime_millis);
     if (_rules.strictTransit() && previousMode != _rules.mode()) {
-      while (_mgr->getOutboundTotal()) releasePacket(_mgr->removeOutboundByIdx(0));
+      clearOutboundQueue();
     }
     if (sync_requested) queuePolicySync();
     return;
@@ -1988,6 +2005,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
+}
+
+void MyMesh::clearOutboundQueue() {
+  while (_mgr->getOutboundTotal()) releasePacket(_mgr->removeOutboundByIdx(0));
 }
 
 void MyMesh::loop() {

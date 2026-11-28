@@ -221,6 +221,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   static bool isPeerHandshake(const mesh::Packet& packet);
   void receivePeerHandshake(const mesh::Packet& packet);
   void servicePolicyPeers();
+  void clearOutboundQueue();
   bool nextPolicyPeerNonce(uint8_t* nonce);
   bool peerPermitted(const uint8_t* key) const;
   const char* peerContextName(PolicyPeerSession::Context context) const;

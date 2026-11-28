@@ -47,6 +47,9 @@ public:
   Decision decide(Subject subject, const uint8_t* key) const;
   bool filterEnabled(Subject subject) const;
   bool forwardingAllowed() const { return _ready && !_forwarding_hold; }
+  bool onboarding() const { return _state.onboarding != 0; }
+  bool transitAllowed() const { return forwardingAllowed() && !onboarding(); }
+  bool startOnboarding();
   void handleRecoveryCommand(const char* command, char* reply);
   Mode mode() const { return static_cast<Mode>(_state.mode); }
   bool strictTransit() const { return mode() == Protected || mode() == Locked; }
@@ -137,6 +140,7 @@ private:
     OriginFloor floors[9];
     char subnet[ScopeNameSize];
     Authority authorities[12];
+    uint8_t onboarding;
     uint8_t digest[32];
   };
 
