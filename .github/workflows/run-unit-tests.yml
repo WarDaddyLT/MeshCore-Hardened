@@ -15,6 +15,12 @@ jobs:
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
 
+      - name: Run HIL Runner Unit Tests
+        run: |
+          python -m pip install -r scripts/hil/requirements.txt
+          python -m unittest discover -s scripts/hil -p 'test_run.py'
+          sh -n scripts/hil/bench.sh
+
       - name: Run Unit Tests
         run: pio test -e native -e native_kiss_modem -e native_savemesh -e native_savemesh_prefs -e native_hardened -vv
 
