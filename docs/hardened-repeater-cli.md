@@ -150,11 +150,17 @@ rules trust <64-hex-repeater-public-key>
 rules untrust <64-hex-repeater-public-key>
 rules sync status
 rules sync
+rules checkpoint
+rules checkpoint global|region
 ```
 
-Configure the domain, sync key, and trusted origin keys over USB on each participating repeater. Use a dedicated randomly generated 16-byte sync key. For regional policy, configure the same region name in the [MeshCore region map](cli_commands.md#region-management-v110) on participating repeaters. Domain and region names accept up to 15 lowercase letters, digits, underscores, or hyphens. The domain and region cannot be renamed while their signed rules or deletion records exist.
+Configure the domain, sync key, and trusted origin keys over USB on each participating repeater. Use a dedicated randomly generated 16-byte sync key. For regional policy, configure the same region name in the [MeshCore region map](cli_commands.md#region-management-v110) on participating repeaters. Domain and region names accept up to 15 lowercase letters, digits, underscores, or hyphens. A scope name is fixed while it has signed records or a committed checkpoint.
 
 Shared updates are signed with the originating repeater key after it authorizes the change. Peers verify that trusted origin signature independently. Sync messages are encrypted with AES-128-GCM and carry one update per packet. Local rules stay on their repeater. A write queues shared updates, and `rules sync` resends active rules and deletion records after a partition. Senders queue at most one update per minute. For a multi-hop reconciliation, run sync on intermediate trusted repeaters that already hold the current state. Untrusting a key stops future updates from that signer. Previously accepted records retain their last state.
+
+Run `rules checkpoint global` or `rules checkpoint region` on the originating repeater to reclaim its shared deletion slots for that scope. It commits a signed checkpoint and queues its active rules. A peer applies the checkpoint atomically after it receives and verifies every record. It preserves newer updates and ignores older updates covered by the committed checkpoint, including after reboot. A peer that installs a checkpoint queues it for relay. Its revision floor survives removing and re-adding the origin key. Checkpoint floor storage holds up to nine full origin keys including the local repeater.
+
+`rules checkpoint` reports the transfer state. Each repeater stages one transfer at a time for up to 30 minutes. The checkpoint header and its records share the one-frame-per-minute policy send budget. After missed frames, reboot, or a partition, issue a fresh checkpoint on the originating repeater and verify the receiving rule list. Use checkpoint-capable firmware on each managed peer that needs to apply or relay checkpoints.
 
 ## Optional administration room
 

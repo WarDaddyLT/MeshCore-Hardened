@@ -138,6 +138,13 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   size_t _notice_count = 0;
   unsigned long _next_notice = 0;
   size_t _sync_cursor = RuleStore::Capacity;
+  enum class CheckpointTransfer { Idle, Receiving, Sending };
+  CheckpointTransfer _checkpoint_transfer = CheckpointTransfer::Idle;
+  RuleStore::Checkpoint _checkpoint{};
+  RuleStore::Rule _checkpoint_records[RuleStore::Capacity];
+  uint32_t _checkpoint_received = 0;
+  uint8_t _checkpoint_cursor = 0;
+  unsigned long _checkpoint_expiry = 0;
   unsigned long _next_policy_tx = 0;
   unsigned long _next_policy_commit = 0;
   const mesh::Packet* _verified_policy_forward = nullptr;
@@ -203,6 +210,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool handleSyncCommand(const char* command, char* reply, bool usb, bool can_write);
   void sendPolicyUpdate();
   mesh::DispatcherAction receivePolicyUpdate(mesh::Packet* packet);
+  static bool isCheckpointPacket(const mesh::Packet& packet);
+  bool checkpointTransport(RuleStore::Scope scope, TransportKey& transport);
+  void handleCheckpointCommand(const char* args, char* reply, bool canWrite);
+  void receiveCheckpointPacket(mesh::Packet& packet);
+  void sendCheckpointPacket();
   bool receiveAdminRoom(mesh::Packet* packet);
   bool handleAdminRoomCommand(const char* command, char* reply, bool usb);
   bool prepareAdminRoomIdentity();

@@ -9,13 +9,39 @@ constexpr const char* Pending = "/hardened_rules_tmp";
 constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
 constexpr const char* Provisioned = "/hardened_rules_provisioned";
 constexpr const char* ForwardingHold = "/hardened_rules_hold";
-constexpr uint8_t Magic[] = {'M', 'C', 'H', 9};
+constexpr uint8_t Magic[] = {'M', 'C', 'H', 10};
 constexpr uint16_t MaxFreezeMinutes = 7 * 24 * 60;
 constexpr uint16_t DefaultFreezeMinutes = 60;
 constexpr uint32_t FreezeCheckpointSeconds = 15 * 60;
 constexpr char SigningDomain[] = "MeshCore Hardened policy v1";
 constexpr size_t SignedSize = sizeof(SigningDomain) + RuleStore::ScopeNameSize * 2
                             + offsetof(RuleStore::Rule, signature) + PUB_KEY_SIZE;
+constexpr char CheckpointDomain[] = "MeshCore Hardened checkpoint v1";
+constexpr size_t CheckpointSignedSize = sizeof(CheckpointDomain) + RuleStore::ScopeNameSize * 2
+                                      + offsetof(RuleStore::Checkpoint, signature);
+
+void checkpointBytes(const RuleStore::Checkpoint& checkpoint, const char* domain, const char* region,
+                     uint8_t (&bytes)[CheckpointSignedSize]) {
+  size_t offset = 0;
+  memcpy(bytes + offset, CheckpointDomain, sizeof(CheckpointDomain));
+  offset += sizeof(CheckpointDomain);
+  memcpy(bytes + offset, domain, RuleStore::ScopeNameSize);
+  offset += RuleStore::ScopeNameSize;
+  if (checkpoint.scope == RuleStore::Region) memcpy(bytes + offset, region, RuleStore::ScopeNameSize);
+  else memset(bytes + offset, 0, RuleStore::ScopeNameSize);
+  offset += RuleStore::ScopeNameSize;
+  memcpy(bytes + offset, &checkpoint, offsetof(RuleStore::Checkpoint, signature));
+}
+
+void checkpointDigest(const RuleStore::Rule* records, size_t count, uint8_t (&digest)[32]) {
+  uint8_t input[32 + RuleStore::WireSize]{};
+  for (size_t i = 0; i < count; ++i) {
+    memcpy(input + 32, records + i, RuleStore::WireSize);
+    mesh::Utils::sha256(digest, sizeof(digest), input, sizeof(input));
+    memcpy(input, digest, sizeof(digest));
+  }
+  memcpy(digest, input, sizeof(digest));
+}
 
 uint32_t decodeRevision(const uint8_t* bytes) {
   return static_cast<uint32_t>(bytes[0])
@@ -218,7 +244,8 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
 
   uint8_t legacyDigest[sizeof(snapshot.digest)];
   constexpr size_t prefixes[] = {offsetof(Snapshot, traffic), offsetof(Snapshot, airtime_share),
-                                 offsetof(Snapshot, probation), offsetof(Snapshot, freeze_seconds)};
+                                 offsetof(Snapshot, probation), offsetof(Snapshot, freeze_seconds),
+                                 offsetof(Snapshot, floors)};
   uint8_t version = 5;
   for (const size_t prefix : prefixes) {
     if (size == prefix + sizeof(legacyDigest)) break;
@@ -230,7 +257,7 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
       && file.read(legacyDigest, sizeof(legacyDigest)) == sizeof(legacyDigest);
   file.close();
   if (!complete || memcmp(snapshot.magic, Magic, 3) != 0 || snapshot.magic[3] != version
-      || snapshot.mode > (version >= 8 ? Protected : LegacyRestricted)) return false;
+      || snapshot.mode > (version >= 9 ? Locked : version >= 8 ? Protected : LegacyRestricted)) return false;
 
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, legacyPrefix);
   if (memcmp(legacyDigest, snapshot.digest, sizeof(legacyDigest)) != 0) return false;
@@ -238,7 +265,8 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
   if (version < 6) snapshot.traffic = {};
   if (version < 7) snapshot.airtime_share = forward_traffic::DefaultAirtimeShare;
   if (version < 8) snapshot.probation = {};
-  snapshot.freeze_seconds = {};
+  if (version < 9) snapshot.freeze_seconds = {};
+  memset(snapshot.floors, 0, sizeof(snapshot.floors));
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, offsetof(Snapshot, digest));
   return true;
 }
@@ -256,6 +284,21 @@ bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
   mesh::Utils::sha256(digest, sizeof(digest), reinterpret_cast<const uint8_t*>(&snapshot),
                      offsetof(Snapshot, digest));
   if (memcmp(digest, snapshot.digest, sizeof(digest)) != 0) return false;
+
+  const uint8_t empty[PUB_KEY_SIZE]{};
+  for (size_t i = 0; i < sizeof(snapshot.floors) / sizeof(snapshot.floors[0]); ++i) {
+    const auto& entry = snapshot.floors[i];
+    const bool global = decodeRevision(entry.global) != 0;
+    const bool region = decodeRevision(entry.region) != 0;
+    if (!global && !region) {
+      if (memcmp(entry.key, empty, sizeof(empty)) != 0) return false;
+      continue;
+    }
+    if (memcmp(entry.key, empty, sizeof(empty)) == 0 || !snapshot.domain[0] || (region && !snapshot.region[0])) return false;
+    for (size_t prior = 0; prior < i; ++prior) {
+      if (memcmp(entry.key, snapshot.floors[prior].key, PUB_KEY_SIZE) == 0) return false;
+    }
+  }
 
   for (size_t i = 0; i < snapshot.count; i++) {
     const auto& rule = snapshot.rules[i];
@@ -463,6 +506,9 @@ bool RuleStore::setScope(Scope scope, const char* name) {
     if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) return false;
   }
   if (strcmp(scopeName(scope), name) == 0) return true;
+  for (const auto& entry : _state.floors) {
+    if (decodeRevision(entry.region) || (scope == Global && decodeRevision(entry.global))) return false;
+  }
   for (size_t i = 0; i < _state.count; i++) {
     uint8_t rule_scope = _state.rules[i].scope;
     if (rule_scope == scope || (scope == Global && rule_scope == Region)) return false;
@@ -492,7 +538,7 @@ bool RuleStore::setTrustedPeer(const uint8_t* key, bool trust, const mesh::Ident
   _candidate = _state;
   for (auto& peer : _candidate.trusted_peers) {
     if (memcmp(peer, trust ? empty : key, PUB_KEY_SIZE) != 0) continue;
-    memcpy(peer, trust ? empty : key, PUB_KEY_SIZE);
+    memcpy(peer, trust ? key : empty, PUB_KEY_SIZE);
     encodeRevision(_candidate.revision, decodeRevision(_state.revision) + 1);
     return commit();
   }
@@ -504,6 +550,116 @@ const RuleStore::Rule* RuleStore::exportRule(size_t index) const {
   const auto& rule = _state.rules[index];
   if (rule.scope == Local) return nullptr;
   return &rule;
+}
+
+uint32_t RuleStore::checkpointFloor(const Snapshot& snapshot, const uint8_t* origin, Scope scope) {
+  for (const auto& entry : snapshot.floors) {
+    if (memcmp(entry.key, origin, PUB_KEY_SIZE) == 0) return decodeRevision(entry.forScope(scope));
+  }
+  return 0;
+}
+
+bool RuleStore::makeCheckpoint(Scope scope, const mesh::LocalIdentity& node, Checkpoint& checkpoint,
+                               Rule (&records)[Capacity]) const {
+  if (!forwardingAllowed() || (scope != Global && scope != Region) || !_state.domain[0]
+      || (scope == Region && !_state.region[0]) || !decodeRevision(_state.revision)) return false;
+  checkpoint = {};
+  checkpoint.scope = scope;
+  memcpy(checkpoint.origin, node.pub_key, PUB_KEY_SIZE);
+  memcpy(checkpoint.floor, _state.revision, sizeof(checkpoint.floor));
+  for (size_t i = 0; i < _state.count; ++i) {
+    const auto& rule = _state.rules[i];
+    if (rule.scope != scope || rule.deleted || !node.matches(rule.origin)) continue;
+    size_t next = checkpoint.count++;
+    while (next && memcmp(records[next - 1].id, rule.id, IdSize) > 0) {
+      records[next] = records[next - 1];
+      --next;
+    }
+    records[next] = rule;
+  }
+  checkpointDigest(records, checkpoint.count, checkpoint.digest);
+  uint8_t signedBytes[CheckpointSignedSize];
+  checkpointBytes(checkpoint, _state.domain, _state.region, signedBytes);
+  node.sign(checkpoint.signature, signedBytes, sizeof(signedBytes));
+  return true;
+}
+
+RuleStore::MergeResult RuleStore::checkCheckpoint(const Checkpoint& checkpoint, const mesh::Identity& node,
+                                                bool local) const {
+  if (!forwardingAllowed() || (checkpoint.scope != Global && checkpoint.scope != Region) || !_state.domain[0]
+      || (checkpoint.scope == Region && !_state.region[0]) || checkpoint.count > Capacity) return Rejected;
+  const uint32_t floor = decodeRevision(checkpoint.floor);
+  if (!floor || local != node.matches(checkpoint.origin)) return Rejected;
+  if (!local) {
+    const auto decision = decide(Repeater, checkpoint.origin);
+    if (!trustedPeer(checkpoint.origin) || decision == Denied || (mode() == Locked && decision != Allowed)) return Rejected;
+  }
+  const auto scope = static_cast<Scope>(checkpoint.scope);
+  uint8_t signedBytes[CheckpointSignedSize];
+  checkpointBytes(checkpoint, _state.domain, _state.region, signedBytes);
+  const mesh::Identity signer(checkpoint.origin);
+  if (!signer.verify(checkpoint.signature, signedBytes, sizeof(signedBytes))) return Rejected;
+  return floor <= checkpointFloor(_state, checkpoint.origin, scope) ? Current : Changed;
+}
+
+RuleStore::MergeResult RuleStore::installCheckpoint(const Checkpoint& checkpoint, const Rule* records,
+                                                   size_t count, const mesh::Identity& node, bool local) {
+  if (count != checkpoint.count || (count && !records)) return Rejected;
+  const auto check = checkCheckpoint(checkpoint, node, local);
+  if (check != Changed) return check;
+  const auto scope = static_cast<Scope>(checkpoint.scope);
+  const uint32_t floor = decodeRevision(checkpoint.floor);
+  const mesh::Identity signer(checkpoint.origin);
+  uint8_t digest[32];
+  checkpointDigest(records, count, digest);
+  if (memcmp(digest, checkpoint.digest, sizeof(digest)) != 0) return Rejected;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& rule = records[i];
+    if (!validRule(rule) || rule.deleted || rule.scope != scope || !signer.matches(rule.origin)
+        || decodeRevision(rule.revision) > floor || (i && memcmp(records[i - 1].id, rule.id, IdSize) >= 0)) return Rejected;
+    uint8_t ruleBytes[SignedSize];
+    signableBytes(_state, rule, ruleBytes);
+    if (!signer.verify(rule.signature, ruleBytes, sizeof(ruleBytes))) return Rejected;
+    for (size_t old = 0; old < _state.count; ++old) {
+      const auto& existing = _state.rules[old];
+      if (memcmp(existing.id, rule.id, IdSize) != 0) continue;
+      if (!signer.matches(existing.origin) || existing.scope != scope) return Rejected;
+      if (decodeRevision(existing.revision) <= floor && memcmp(&existing, &rule, WireSize) != 0) return Rejected;
+    }
+  }
+  const uint32_t revision = decodeRevision(_state.revision);
+  if (revision == UINT32_MAX) return Rejected;
+  _candidate = _state;
+  OriginFloor* target = nullptr;
+  const uint8_t empty[PUB_KEY_SIZE]{};
+  for (auto& entry : _candidate.floors) {
+    if (signer.matches(entry.key)) { target = &entry; break; }
+    if (!target && memcmp(entry.key, empty, sizeof(empty)) == 0) target = &entry;
+  }
+  if (!target) return Rejected;
+  memcpy(target->key, checkpoint.origin, PUB_KEY_SIZE);
+  encodeRevision(target->forScope(scope), floor);
+
+  // Retain updates newer than the checkpoint, including later deletions.
+  size_t retained = 0;
+  for (size_t i = 0; i < _state.count; ++i) {
+    const auto& old = _state.rules[i];
+    if (old.scope == scope && signer.matches(old.origin) && decodeRevision(old.revision) <= floor) continue;
+    _candidate.rules[retained++] = old;
+  }
+  _candidate.count = retained;
+  for (size_t i = 0; i < count; ++i) {
+    bool newer = false;
+    for (size_t old = 0; old < retained; ++old) {
+      if (memcmp(records[i].id, _candidate.rules[old].id, IdSize) == 0) newer = true;
+    }
+    if (newer) continue;
+    const size_t slot = reserveRuleSlot(_candidate);
+    if (slot == Capacity) return Rejected;
+    _candidate.rules[slot] = records[i];
+  }
+  encodeRevision(_candidate.revision, revision + 1);
+  return commit() ? Changed : Rejected;
 }
 
 RuleStore::MergeResult RuleStore::mergeRule(Rule& rule, const uint8_t* fingerprint,
@@ -526,6 +682,7 @@ RuleStore::MergeResult RuleStore::mergeRule(Rule& rule, const uint8_t* fingerpri
     }
   }
   if (!verified) return Rejected;
+  if (decodeRevision(rule.revision) <= checkpointFloor(_state, rule.origin, static_cast<Scope>(rule.scope))) return Current;
 
   size_t index = 0;
   for (; index < _state.count; index++) {
