@@ -1,4 +1,5 @@
 import json
+import stat
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -10,7 +11,31 @@ from run import RAW_RX, ROLES, Skip, decode_advert, decode_public_text, find_una
 from run import CONTACT_INFO, CONTACT_MESSAGE, CONTACT_MESSAGE_V3, Device, Failure, decode_cli_reply, find_unacknowledged_rule
 from run import test_manual_onboarding as run_manual_onboarding, test_remote_acl as run_remote_acl
 from run import test_peer_onboarding as run_peer_onboarding
-from run import decode_quiet_receipt, quiet_criteria, quiet_summary, pairs, test_shared_rule_recovery as run_shared_rule_recovery
+from run import decode_quiet_receipt, quiet_criteria, quiet_summary, run_scenarios, pairs, test_shared_rule_recovery as run_shared_rule_recovery
+
+from setup_bench import observer_secret
+
+
+class ObserverSettingsTest(unittest.TestCase):
+    def test_secret_is_private_and_reused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "observer.txt"
+            first = observer_secret(path)
+            self.assertEqual(len(first), 16)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(observer_secret(path), first)
+            path.chmod(0o644)
+            with self.assertRaisesRegex(Failure, "private file"):
+                observer_secret(path)
+
+
+class AdvertPolicyTest(unittest.TestCase):
+    def test_direct_only_fixture_skips_flood_advert_suite_before_running(self):
+        report = {"cases": [], "samples": [], "temporary_rules": {}, "cleanup": {}}
+        run_scenarios({}, report, ("actor",), direct_adverts_only=True)
+        self.assertEqual(report["cases"][0]["status"], "SKIP")
+        self.assertIn("direct adverts only", report["cases"][0]["reason"])
+        self.assertEqual(report["samples"], [])
 
 
 class QuietDeliveryTest(unittest.TestCase):

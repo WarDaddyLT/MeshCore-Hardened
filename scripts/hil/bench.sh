@@ -11,10 +11,11 @@ if [ "$#" -gt 0 ]; then shift; fi
 case "$action" in
     help|-h|--help)
         cat <<'HELP'
-Usage: scripts/hil/bench.sh <build|build-admin|prepare|list|preflight|run> [runner options]
+Usage: scripts/hil/bench.sh <build|build-admin|prepare|setup|list|preflight|run> [runner options]
   build      Compile the RAK 1W and ThinkNode M5 repeater images.
   build-admin Compile the USB-capable Wio Tracker e-ink admin bench image.
   prepare    Install test dependencies, pin the four USB keys, and check preflight.
+  setup      Provision the named, scoped USB fixture and private channel.
   list       List USB devices.
   preflight  Check the pinned USB identities and settings without transmitting.
   run        Run the actor scenario by default. Accepts --suite or --all.
@@ -41,7 +42,7 @@ HELP
         printf '%s\n' ".pio/build/WioTrackerL1Eink_hil_admin_usb/firmware.zip"
         exit 0
         ;;
-    prepare|list|preflight|run) ;;
+    prepare|setup|list|preflight|run) ;;
     *) printf '%s\n' "Unknown bench action: $action" >&2; exit 2 ;;
 esac
 
@@ -63,6 +64,7 @@ case "$action" in
         fi
         exec "$bench_python" "$bench_dir/run.py" --pin "$@"
         ;;
+    setup) exec "$bench_python" "$bench_dir/setup_bench.py" "$@" ;;
     list) exec "$bench_python" "$bench_dir/run.py" --list "$@" ;;
     preflight) exec "$bench_python" "$bench_dir/run.py" --preflight "$@" ;;
     run)
