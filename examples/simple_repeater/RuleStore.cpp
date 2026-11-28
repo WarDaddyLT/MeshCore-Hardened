@@ -9,7 +9,7 @@ constexpr const char* Pending = "/hardened_rules_tmp";
 constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
 constexpr const char* Provisioned = "/hardened_rules_provisioned";
 constexpr const char* ForwardingHold = "/hardened_rules_hold";
-constexpr uint8_t Magic[] = {'M', 'C', 'H', 12};
+constexpr uint8_t Magic[] = {'M', 'C', 'H', 13};
 constexpr uint16_t MaxFreezeMinutes = 7 * 24 * 60;
 constexpr uint16_t DefaultFreezeMinutes = 60;
 constexpr uint32_t FreezeCheckpointSeconds = 15 * 60;
@@ -17,6 +17,10 @@ constexpr char SigningDomain[] = "MeshCore Hardened policy v1";
 constexpr size_t SignedSize = sizeof(SigningDomain) + RuleStore::ScopeNameSize * 2
                             + offsetof(RuleStore::Rule, signature) + PUB_KEY_SIZE;
 constexpr char CheckpointDomain[] = "MeshCore Hardened checkpoint v1";
+constexpr char SubnetModeDomain[] = "MeshCore Hardened subnet mode v1";
+constexpr size_t SubnetModeProofSize = sizeof(SubnetModeDomain) + RuleStore::ScopeNameSize
+                                     + offsetof(RuleStore::SubnetModeRecord, signature);
+constexpr uint64_t MaxSubnetRevisionAdvance = uint64_t(1) << 32;
 constexpr size_t CheckpointSignedSize = sizeof(CheckpointDomain) + RuleStore::ScopeNameSize * 2
                                       + offsetof(RuleStore::Checkpoint, signature);
 
@@ -41,6 +45,37 @@ void checkpointDigest(const RuleStore::Rule* records, size_t count, uint8_t (&di
     memcpy(input, digest, sizeof(digest));
   }
   memcpy(digest, input, sizeof(digest));
+}
+
+void subnetModeBytes(const char* subnet, const RuleStore::SubnetModeRecord& record,
+                     uint8_t (&bytes)[SubnetModeProofSize]) {
+  memcpy(bytes, SubnetModeDomain, sizeof(SubnetModeDomain));
+  memcpy(bytes + sizeof(SubnetModeDomain), subnet, RuleStore::ScopeNameSize);
+  memcpy(bytes + sizeof(SubnetModeDomain) + RuleStore::ScopeNameSize,
+         &record, offsetof(RuleStore::SubnetModeRecord, signature));
+}
+
+bool verifiedSubnetMode(const char* subnet, const RuleStore::SubnetModeRecord& record) {
+  if (!*subnet || (record.mode != RuleStore::Normal && record.mode != RuleStore::Protected
+      && record.mode != RuleStore::Locked)) return false;
+  uint8_t bytes[SubnetModeProofSize];
+  subnetModeBytes(subnet, record, bytes);
+  return mesh::Identity(record.origin).verify(record.signature, bytes, sizeof(bytes));
+}
+
+uint64_t subnetRevision(const RuleStore::SubnetModeRecord& record) {
+  uint64_t revision = 0;
+  for (unsigned i = 0; i < sizeof(record.revision); ++i) revision |= uint64_t(record.revision[i]) << (8 * i);
+  return revision;
+}
+
+const char* modeText(RuleStore::Mode mode) {
+  switch (mode) {
+    case RuleStore::Locked: return "locked";
+    case RuleStore::Protected: return "protected";
+    case RuleStore::LegacyRestricted: return "restricted";
+    default: return "normal";
+  }
 }
 
 uint32_t decodeRevision(const uint8_t* bytes) {
@@ -246,7 +281,7 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
   constexpr size_t prefixes[] = {offsetof(Snapshot, traffic), offsetof(Snapshot, airtime_share),
                                  offsetof(Snapshot, probation), offsetof(Snapshot, freeze_seconds),
                                  offsetof(Snapshot, floors), offsetof(Snapshot, subnet),
-                                 offsetof(Snapshot, onboarding)};
+                                 offsetof(Snapshot, onboarding), offsetof(Snapshot, subnet_mode)};
   uint8_t version = 5;
   for (const size_t prefix : prefixes) {
     if (size == prefix + sizeof(legacyDigest)) break;
@@ -283,7 +318,8 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
       }
     }
   }
-  snapshot.onboarding = snapshot.subnet[0] != 0;
+  if (version < 12) snapshot.onboarding = snapshot.subnet[0] != 0;
+  snapshot.subnet_mode = {};
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, offsetof(Snapshot, digest));
   return true;
 }
@@ -303,6 +339,11 @@ bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
   mesh::Utils::sha256(digest, sizeof(digest), reinterpret_cast<const uint8_t*>(&snapshot),
                      offsetof(Snapshot, digest));
   if (memcmp(digest, snapshot.digest, sizeof(digest)) != 0) return false;
+
+  if (subnetRevision(snapshot.subnet_mode)) {
+    if (!verifiedSubnetMode(snapshot.subnet, snapshot.subnet_mode)) return false;
+  } else if (!mesh::Utils::isZeroes(reinterpret_cast<const uint8_t*>(&snapshot.subnet_mode),
+                                  sizeof(snapshot.subnet_mode))) return false;
 
   const uint8_t empty[PUB_KEY_SIZE]{};
   const uint8_t scopes = (snapshot.domain[0] ? scopePermission(Global) : 0)
@@ -554,6 +595,7 @@ bool RuleStore::setScope(Scope scope, const char* name) {
     if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) return false;
   }
   if (strcmp(scopeName(scope), name) == 0) return true;
+  if (scope == Subnet && subnetModeRevision()) return false;
   const uint8_t affected = scopePermission(scope) | (scope == Global ? scopePermission(Region) : 0);
   for (const auto& entry : _state.authorities) {
     if ((entry.permissions | entry.retired) & affected) return false;
@@ -873,12 +915,31 @@ RuleStore::Decision RuleStore::decide(Subject subject, const uint8_t* key) const
 }
 
 const char* RuleStore::modeName() const {
-  switch (mode()) {
-    case Locked: return "locked";
-    case Protected: return "protected";
-    case LegacyRestricted: return "restricted";
-    default: return "normal";
-  }
+  return modeText(mode());
+}
+
+RuleStore::Mode RuleStore::mode() const {
+  return static_cast<Mode>(_state.mode > _state.subnet_mode.mode ? _state.mode : _state.subnet_mode.mode);
+}
+
+uint64_t RuleStore::subnetModeRevision() const {
+  return subnetRevision(_state.subnet_mode);
+}
+
+RuleStore::MergeResult RuleStore::mergeSubnetMode(const SubnetModeRecord& record, const mesh::Identity& node) {
+  if (!forwardingAllowed() || node.matches(record.origin) || !publisherAllowed(Subnet, record.origin, node)) return Rejected;
+  const uint64_t incoming = subnetRevision(record);
+  const uint64_t current = subnetModeRevision();
+  if (!incoming || (incoming > current && incoming - current > MaxSubnetRevisionAdvance)
+      || !verifiedSubnetMode(_state.subnet, record)) return Rejected;
+  if (incoming < current || (incoming == current
+      && memcmp(record.origin, _state.subnet_mode.origin, PUB_KEY_SIZE) <= 0)) return Current;
+  const uint32_t revision = decodeRevision(_state.revision);
+  if (revision == UINT32_MAX) return Rejected;
+  _candidate = _state;
+  _candidate.subnet_mode = record;
+  encodeRevision(_candidate.revision, revision + 1);
+  return commit() ? Changed : Rejected;
 }
 
 uint32_t RuleStore::freezeRemaining(uint64_t uptimeMs) const {
@@ -1022,6 +1083,18 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
     snprintf(reply, 150, "mode=%s", modeName());
     return;
   }
+  const char* subnetModeArg;
+  const bool setSubnetMode = savemesh::matchCommand(command, "subnet mode", &subnetModeArg);
+  const uint64_t appliedSubnetRevision = subnetModeRevision();
+  if (setSubnetMode && !*subnetModeArg) {
+    snprintf(reply, 150, "subnet=%s mode=%s rev=%08lx%08lx local=%s effective=%s",
+             _state.subnet[0] ? _state.subnet : "none",
+             appliedSubnetRevision ? modeText(static_cast<Mode>(_state.subnet_mode.mode)) : "unset",
+             static_cast<unsigned long>(appliedSubnetRevision >> 32),
+             static_cast<unsigned long>(appliedSubnetRevision & UINT32_MAX),
+             modeText(static_cast<Mode>(_state.mode)), modeName());
+    return;
+  }
   const char* freezeArgs;
   const bool setFreeze = savemesh::matchCommand(command, "freeze", &freezeArgs);
   if (setFreeze && !*freezeArgs) {
@@ -1099,7 +1172,26 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
   }
   encodeRevision(_candidate.revision, revision + 1);
   Rule* changed = nullptr;
-  if (setFreeze) {
+  if (setSubnetMode) {
+    if (!can_publish || !publisherAllowed(Subnet, node.pub_key, node)) {
+      strcpy(reply, "Err - local repeater is not a subnet publisher");
+      return;
+    }
+    Mode selected;
+    if (savemesh::matchesValue(subnetModeArg, "normal")) selected = Normal;
+    else if (savemesh::matchesValue(subnetModeArg, "protected")) selected = Protected;
+    else if (savemesh::matchesValue(subnetModeArg, "locked")) selected = Locked;
+    else { strcpy(reply, "Err - use subnet mode normal, protected or locked"); return; }
+    if (appliedSubnetRevision == UINT64_MAX) { strcpy(reply, "Err - subnet revision exhausted"); return; }
+    const uint64_t next = appliedSubnetRevision + 1;
+    auto& record = _candidate.subnet_mode;
+    memcpy(record.origin, node.pub_key, PUB_KEY_SIZE);
+    record.mode = selected;
+    for (unsigned i = 0; i < sizeof(record.revision); ++i) record.revision[i] = next >> (8 * i);
+    uint8_t bytes[SubnetModeProofSize];
+    subnetModeBytes(_candidate.subnet, record, bytes);
+    node.sign(record.signature, bytes, sizeof(bytes));
+  } else if (setFreeze) {
     const char* duration;
     if (savemesh::matchesValue(freezeArgs, "end")) {
       if (!enrollmentFrozen()) { strcpy(reply, "OK"); return; }

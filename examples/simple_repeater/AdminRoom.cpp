@@ -1,5 +1,7 @@
 #include "MyMesh.h"
 
+#ifndef HARDENED_NO_ADMIN_ROOM
+
 namespace {
 constexpr size_t AdvertChunkSize = 48;
 constexpr size_t AdvertDigestSize = 32;
@@ -285,3 +287,5 @@ bool MyMesh::receiveAdminRoom(mesh::Packet* packet) {
   sendAdminRoomPacket(packet, reply, *session, 600);
   return true;
 }
+
+#endif

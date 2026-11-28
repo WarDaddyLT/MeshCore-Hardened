@@ -42,6 +42,12 @@ public:
     uint8_t signature[SIGNATURE_SIZE];
   };
   enum MergeResult : uint8_t { Rejected, Current, Changed };
+  struct SubnetModeRecord {
+    uint8_t origin[PUB_KEY_SIZE];
+    uint8_t revision[8];
+    uint8_t mode;
+    uint8_t signature[SIGNATURE_SIZE];
+  };
 
   void begin(FILESYSTEM* fs, const mesh::LocalIdentity& node);
   Decision decide(Subject subject, const uint8_t* key) const;
@@ -51,7 +57,10 @@ public:
   bool transitAllowed() const { return forwardingAllowed() && !onboarding(); }
   bool startOnboarding();
   void handleRecoveryCommand(const char* command, char* reply);
-  Mode mode() const { return static_cast<Mode>(_state.mode); }
+  Mode mode() const;
+  const SubnetModeRecord& subnetModeRecord() const { return _state.subnet_mode; }
+  uint64_t subnetModeRevision() const;
+  MergeResult mergeSubnetMode(const SubnetModeRecord& record, const mesh::Identity& node);
   bool strictTransit() const { return mode() == Protected || mode() == Locked; }
   const char* modeName() const;
   const probation::Snapshot& probationState() const { return _state.probation; }
@@ -141,6 +150,7 @@ private:
     char subnet[ScopeNameSize];
     Authority authorities[12];
     uint8_t onboarding;
+    SubnetModeRecord subnet_mode;
     uint8_t digest[32];
   };
 

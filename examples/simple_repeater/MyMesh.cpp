@@ -655,6 +655,7 @@ bool MyMesh::shouldExportToBridge(mesh::Packet* packet) {
       && packet->payload[0] == PolicyType) return false;
   if (isCheckpointPacket(*packet)) return false;
   if (isPeerHandshake(*packet)) return false;
+  if (isSubnetModePacket(*packet)) return false;
   if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
       && (!verifyReceivedAdvert(*packet) || !allowVerifiedAdvert(*packet, false))) return false;
   return !shouldDropByRate(packet, _bridge_forward_budget);
@@ -708,11 +709,17 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
     receivePeerHandshake(*pkt);
     return ACTION_RELEASE;
   }
+  if (isSubnetModePacket(*pkt)) {
+    receiveSubnetMode(*pkt);
+    return ACTION_RELEASE;
+  }
   if (pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL && pkt->payload_len
       && pkt->payload[0] == PolicyType) {
     return receivePolicyUpdate(pkt);
   }
+#ifndef HARDENED_NO_ADMIN_ROOM
   if (receiveAdminRoom(pkt)) return ACTION_RELEASE;
+#endif
   return Mesh::onRecvPacket(pkt);
 }
 
@@ -848,6 +855,14 @@ bool MyMesh::handleAuthorityCommand(const char* command, char* reply, bool usb, 
     return true;
   }
   if (matchCommand(command, "subnet", &args)) {
+    const char* modeArg;
+    if (matchCommand(args, "mode", &modeArg)) return false;
+    if (matchesValue(args, "sync")) {
+      if (!can_write) strcpy(reply, "Err - admin permission required");
+      else if (!_rules.subnetModeRevision()) strcpy(reply, "Err - no subnet mode to send");
+      else { queueSubnetMode(); strcpy(reply, "OK - subnet mode queued"); }
+      return true;
+    }
     if (!*args) {
       const auto* name = _rules.scopeName(RuleStore::Subnet);
       snprintf(reply, 150, "subnet=%s", *name ? name : "none");
@@ -1433,8 +1448,10 @@ void MyMesh::begin(FILESYSTEM *fs) {
   acl.begin(_fs, self_id);
   _rules.begin(_fs, self_id);
   _probation.begin(_rules.probationState(), uptime_millis);
+#ifndef HARDENED_NO_ADMIN_ROOM
   _room_identity_loaded = _rules.loadRoomIdentity(_room_identity)
                        && _room_identity.pub_key[0] != self_id.pub_key[0];
+#endif
   // TODO: key_store.begin();
   region_map.load(_fs);
 
@@ -1805,7 +1822,14 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 
   const char* args;
+#ifndef HARDENED_NO_ADMIN_ROOM
   if ((!client || client->isAdmin()) && handleAdminRoomCommand(command, reply, !client)) return;
+#else
+  if ((!client || client->isAdmin()) && matchesValue(command, "get admin.enabled")) {
+    strcpy(reply, "off");
+    return;
+  }
+#endif
   if ((!client || client->isAdmin()) && matchCommand(command, "neighbours", &args)) {
     handleNeighbourCommand(args, reply, !client);
     return;
@@ -1885,11 +1909,13 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     if (handleSyncCommand(args, reply, !client, can_write)) return;
     bool sync_requested = false;
     const auto previousMode = _rules.mode();
+    const auto previousSubnetRevision = _rules.subnetModeRevision();
     _rules.handleCommand(args, reply, self_id, client ? &client->id : nullptr,
                          sender_timestamp, *getRNG(), can_write, can_write, sync_requested, uptime_millis);
     if (_rules.strictTransit() && previousMode != _rules.mode()) {
       clearOutboundQueue();
     }
+    if (_rules.subnetModeRevision() != previousSubnetRevision) queueSubnetMode();
     if (sync_requested) queuePolicySync();
     return;
   }
@@ -2019,6 +2045,7 @@ void MyMesh::loop() {
   mesh::Mesh::loop();
   sendNeighbourNotice();
   servicePolicyPeers();
+  sendSubnetMode();
   sendCheckpointPacket();
   sendPolicyUpdate();
 
