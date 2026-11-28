@@ -2,6 +2,7 @@ name: Run Unit Tests
 
 on:
   workflow_dispatch:
+  pull_request:
 
 jobs:
   test:
@@ -15,7 +16,7 @@ jobs:
         uses: ./.github/actions/setup-build-environment
 
       - name: Run Unit Tests
-        run: pio test -e native -e native_kiss_modem -e native_savemesh -e native_savemesh_prefs -vv
+        run: pio test -e native -e native_kiss_modem -e native_savemesh -e native_savemesh_prefs -e native_hardened -vv
 
       - name: Upload Test Results
         # Upload test results even if the test step failed.
@@ -25,5 +26,7 @@ jobs:
           name: test-results
           path: |
             .pio/build/native/
+            .pio/build/native_kiss_modem/
             .pio/build/native_savemesh/
             .pio/build/native_savemesh_prefs/
+            .pio/build/native_hardened/
