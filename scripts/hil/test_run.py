@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from run import RAW_RX, ROLES, Skip, decode_advert, decode_public_text, find_unacknowledged_deny, pin_keys, write_report
 from run import CONTACT_INFO, CONTACT_MESSAGE, CONTACT_MESSAGE_V3, Failure, decode_cli_reply, find_unacknowledged_rule
 from run import test_manual_onboarding as run_manual_onboarding, test_remote_acl as run_remote_acl
+from run import test_peer_onboarding as run_peer_onboarding
 from run import pairs, test_shared_rule_recovery as run_shared_rule_recovery
 
 
@@ -49,9 +50,53 @@ class ManualOnboardingTest(unittest.TestCase):
     def test_no_probe_or_write_if_already_active(self):
         active = "subnet=bench onboarding=active source=manual transit=available"
         devices = {role: SimpleNamespace(cli=lambda command: active) for role in ("R1", "R2")}
-        with patch("run.sample") as sample, self.assertRaisesRegex(Skip, "Set up R2"):
+        with patch("run.sample") as sample, self.assertRaisesRegex(Skip, "set up R2"):
             run_manual_onboarding(devices, {})
         sample.assert_not_called()
+
+
+class PeerOnboardingTest(unittest.TestCase):
+    def test_snapshot_is_staged_with_matching_policy_before_activation(self):
+        provider_key, joining_key = "11" * 32, "22" * 32
+        mode = "subnet=bench mode=normal rev=0000000000000007 local=normal effective=normal"
+        fetch = f"rules onboarding peer fetch {provider_key}"
+
+        def provider_cli(command):
+            return {
+                "rules onboarding": "subnet=bench onboarding=active source=manual transit=available",
+                f"rules peer status subnet {joining_key}": "peer=authenticated",
+                f"rules authority {provider_key}": "subnet=allowed",
+                "rules subnet mode": mode,
+            }[command]
+
+        def joining_cli(command):
+            if command == fetch:
+                requests.append(command)
+                return "OK - policy snapshot request queued"
+            if command == "rules onboarding":
+                source = "peer" if requests else "manual"
+                return f"subnet=bench onboarding=pending source={source} transit=held"
+            if command == "rules onboarding peer":
+                return next(transfer)
+            return {
+                f"rules peer status subnet {provider_key}": "peer=authenticated",
+                f"rules authority {provider_key}": "subnet=allowed",
+                "rules subnet mode": mode,
+            }[command]
+
+        requests = []
+        transfer = iter(("peer=idle received=0 transit=held", "peer=pending received=0 transit=held",
+                         "peer=staged received=150 transit=held"))
+        devices = {"R1": SimpleNamespace(key=provider_key, cli=provider_cli),
+                   "R2": SimpleNamespace(key=joining_key, cli=joining_cli)}
+        report = {"samples": [], "cleanup": {}}
+        with patch("run.activate_onboarding") as activate, patch("run.time.sleep"):
+            run_peer_onboarding(devices, report)
+        self.assertEqual(requests, [fetch])
+        activate.assert_called_once_with(devices, report,
+                                        {"subnet": "bench", "onboarding": "pending",
+                                         "source": "peer", "transit": "held"})
+        self.assertEqual(report["samples"][0]["received"], 150)
 
 
 class AdvertTest(unittest.TestCase):
