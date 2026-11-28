@@ -46,9 +46,31 @@ The RAK3401 forwarded private group text before, during, and after the deny. The
 
 The T-Echo Lite Kit accepted official firmware updates over DFU but did not answer companion queries over USB. The RAK3401's USB console applied and removed the test rules, so the T-Echo remote admin flow remains pending. Cleanup restored the repeater's previous forwarding and notification settings, cleared the temporary M5 channel, and left no active test rules. The two test deletion records remain in the rule store.
 
-## First-alpha baseline build
+## First-alpha bench builds
 
-The imported baseline commit `0bf5d85388fb98bd0b392301776786b56c31079b` contains the [pinned SaveMeshcore source](source-baseline.md). Building an isolated export of that commit with `pio run -e RAK_3401_repeater` produced a DFU ZIP with SHA-256 `d647d0be4b79c10b9dccd07f77ec0d40f88f7c6023cfb5fd93285b5063925178`. PlatformIO reported 413,232 bytes of flash and 35,652 bytes of static RAM. No MeshCore USB ports were present at inventory, so R2, the two stock companions, and RF evidence are pending.
+The SaveMeshcore builds use the [pinned source snapshot](source-baseline.md) from import commit `0bf5d85388fb98bd0b392301776786b56c31079b`. The Hardened bench images use commit `dc484101231878845eed0806d668f47c96b8c703`. The source changes between that commit and the merged peer-onboarding test affect test tooling only.
+
+Run `pio run -e RAK_3401_repeater -e ThinkNode_M5_Repeater` from each source tree. The RAK 1W artifact is the RAK3401 DFU application ZIP. The ThinkNode M5 artifact is the ESP32-S3 application binary.
+
+| Bench role and PlatformIO target | Build | Static RAM used | Application flash used |
+| --- | --- | ---: | ---: |
+| R1 RAK 1W, `RAK_3401_repeater` | SaveMeshcore | 35,652 / 235,520 bytes | 413,232 / 815,104 bytes |
+| R1 RAK 1W, `RAK_3401_repeater` | Hardened | 66,636 / 235,520 bytes | 493,312 / 815,104 bytes |
+| R2 ThinkNode M5, `ThinkNode_M5_Repeater` | SaveMeshcore | 63,672 / 524,288 bytes | 1,132,821 / 1,310,720 bytes |
+| R2 ThinkNode M5, `ThinkNode_M5_Repeater` | Hardened | 94,584 / 524,288 bytes | 1,190,277 / 1,310,720 bytes |
+
+PlatformIO reports 80,080 additional flash bytes and 30,984 additional static RAM bytes on the RAK 1W, and 57,456 additional flash bytes and 30,912 additional static RAM bytes on the ThinkNode M5. The RAM figures are linker estimates. Runtime headroom, forwarding CPU cost and airtime, clean installs, upgrades, and rollback remain pending on the four-device bench.
+
+| Build and artifact | SHA-256 for the bench copy |
+| --- | --- |
+| SaveMeshcore R1 `firmware.zip` | `fddb0069f3b76d391a923252d6072c3df803493ec835dd1769ab349fa5119a46` |
+| SaveMeshcore R2 `firmware.bin` | `359bb8766f106ee8a37e9c9b46f12cbe778440bb04b6c3a142af0ca05c323b49` |
+| Hardened R1 `firmware.zip` | `4730e2b642e49606aa9b33b0062b3331b86af23245d886b23dc20e2de78c595d` |
+| Hardened R2 `firmware.bin` | `a2b1508b8c675256b137b13506e52a3ba969aef46bae993ef9f94582ab7fb0fc` |
+| Wio Tracker L1 Pro e-ink USB ADMIN bench `firmware.zip` | `51d8fcd159b013d7ad1d7e6400e82b1c28dcc5170c8288bab1c4dbed8a0c74e3` |
+| T-Echo Lite Kit stock USB ACTOR v1.17.1 DFU ZIP | `10a103acc7af77664473876e5a082390c5ff87af0e1066c7e55d727eed32d099` |
+
+These checksums identify the local artifacts. Record the exact artifacts installed on each device in the [four-device bench configuration](../scripts/hil/README.md) and confirm the resulting identity and firmware over USB. The e-ink ADMIN image has built successfully and still needs installation and USB confirmation. Stock Android interoperability and the physical bad-actor scenarios are release gates.
 
 ## Forwarding and identity audit
 
