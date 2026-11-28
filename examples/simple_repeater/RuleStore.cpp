@@ -445,6 +445,8 @@ void RuleStore::handleRecoveryCommand(const char* command, char* reply) {
     _forwarding_hold = true;
 
     _candidate = empty ? Snapshot{} : _state;
+    // Recovered revisions can precede peer sessions established before the failure.
+    memset(_candidate.sync_key, 0, sizeof(_candidate.sync_key));
     memcpy(_candidate.magic, Magic, sizeof(Magic));
     encodeRevision(_candidate.revision, revision + 1);
     if (!commit()) {
@@ -459,7 +461,7 @@ void RuleStore::handleRecoveryCommand(const char* command, char* reply) {
     }
     _invalid_slots = 0;
     _ready = true;
-    strcpy(reply, "OK - review policy before rules resume");
+    strcpy(reply, "OK - sync key cleared; review policy before rules resume");
   }
 }
 
@@ -479,6 +481,14 @@ bool RuleStore::setSyncKey(const uint8_t* key) {
   encodeRevision(_candidate.revision, decodeRevision(_state.revision) + 1);
   memcpy(_candidate.sync_key, key, CIPHER_KEY_SIZE);
   return commit();
+}
+
+uint32_t RuleStore::reservePeerEpoch() {
+  const uint32_t revision = decodeRevision(_state.revision);
+  if (!forwardingAllowed() || revision == UINT32_MAX) return 0;
+  _candidate = _state;
+  encodeRevision(_candidate.revision, revision + 1);
+  return commit() ? revision + 1 : 0;
 }
 
 bool RuleStore::loadRoomIdentity(mesh::LocalIdentity& identity) const {
@@ -787,7 +797,7 @@ RuleStore::MergeResult RuleStore::installCheckpoint(const Checkpoint& checkpoint
 }
 
 RuleStore::MergeResult RuleStore::mergeRule(Rule& rule, const uint8_t* fingerprint,
-                                          const mesh::Identity& node) {
+                                          const mesh::Identity& node, const uint8_t* requiredOrigin) {
   if (!_ready || !_state.domain[0] || rule.scope == Local || !validRule(rule)
       || (rule.scope == Region && !_state.region[0])) return Rejected;
   bool verified = false;
@@ -796,6 +806,7 @@ RuleStore::MergeResult RuleStore::mergeRule(Rule& rule, const uint8_t* fingerpri
   for (const auto& entry : _state.authorities) {
     const auto* peer = entry.key;
     if (!(entry.permissions & scopePermission(scope)) || node.matches(peer)
+        || (requiredOrigin && memcmp(peer, requiredOrigin, PUB_KEY_SIZE) != 0)
         || memcmp(peer, fingerprint, FingerprintSize) != 0) continue;
     const auto decision = decide(Repeater, peer);
     if (decision == Denied || (mode() == Locked && decision != Allowed)) continue;

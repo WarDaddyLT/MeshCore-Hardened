@@ -44,6 +44,7 @@
 #include "ReceiveWork.h"
 #include "DeviceActivity.h"
 #include "CliParse.h"
+#include "PolicyPeerSession.h"
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
@@ -138,16 +139,23 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   size_t _notice_count = 0;
   unsigned long _next_notice = 0;
   size_t _sync_cursor = RuleStore::Capacity;
+  size_t _sync_peer_cursor = 0;
   enum class CheckpointTransfer { Idle, Receiving, Sending };
   CheckpointTransfer _checkpoint_transfer = CheckpointTransfer::Idle;
   RuleStore::Checkpoint _checkpoint{};
   RuleStore::Rule _checkpoint_records[RuleStore::Capacity];
   uint32_t _checkpoint_received = 0;
   uint8_t _checkpoint_cursor = 0;
+  size_t _checkpoint_peer_cursor = 0;
+  uint8_t _checkpoint_sender[PUB_KEY_SIZE]{};
+  uint8_t _checkpoint_target[PUB_KEY_SIZE]{};
   unsigned long _checkpoint_expiry = 0;
+  PolicyPeerSession _policy_peers[8];
+  uint32_t _peer_epoch = 0;
+  uint32_t _peer_nonce_counter = 0;
+  unsigned long _next_peer_epoch_attempt = 0;
   unsigned long _next_policy_tx = 0;
   unsigned long _next_policy_commit = 0;
-  const mesh::Packet* _verified_policy_forward = nullptr;
   mesh::LocalIdentity _room_identity;
   bool _room_identity_loaded = false;
   struct RoomSession {
@@ -209,6 +217,24 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void handleNeighbourCommand(const char* command, char* reply, bool usb);
   bool handleSyncCommand(const char* command, char* reply, bool usb, bool can_write);
   bool handleAuthorityCommand(const char* command, char* reply, bool usb, bool can_write);
+  bool handlePeerCommand(const char* command, char* reply, bool canWrite);
+  static bool isPeerHandshake(const mesh::Packet& packet);
+  void receivePeerHandshake(const mesh::Packet& packet);
+  void servicePolicyPeers();
+  bool nextPolicyPeerNonce(uint8_t* nonce);
+  bool peerPermitted(const uint8_t* key) const;
+  const char* peerContextName(PolicyPeerSession::Context context) const;
+  PolicyPeerSession* findPolicyPeer(PolicyPeerSession::Context context, const uint8_t* key, bool allocate);
+  void queuePolicySync() { _sync_cursor = 0; _sync_peer_cursor = 0; }
+  static constexpr size_t PolicyNonceSize = 12;
+  static constexpr size_t PolicyTagSize = 12;
+  static constexpr size_t PolicyHeaderSize = 1 + PolicyNonceSize;
+  PolicyPeerSession* openPolicyFrame(const mesh::Packet& packet, PolicyPeerSession::Context context,
+                                     uint8_t* data, size_t size, const void* associated = nullptr,
+                                     size_t associatedSize = 0);
+  bool queuePolicyFrame(PolicyPeerSession& session, uint8_t type, const uint8_t* data, size_t size,
+                        const TransportKey& transport, const void* associated = nullptr, size_t associatedSize = 0);
+  bool policyScopeReceived(mesh::Packet& packet, RuleStore::Scope scope);
   void sendPolicyUpdate();
   mesh::DispatcherAction receivePolicyUpdate(mesh::Packet* packet);
   static bool isCheckpointPacket(const mesh::Packet& packet);

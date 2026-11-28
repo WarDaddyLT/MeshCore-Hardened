@@ -268,12 +268,14 @@ rules publisher grant global <repeater-A-public-key>
 rules sync status
 ```
 
-Domain and region names accept 1–15 lowercase letters, digits, underscores, or hyphens. The shared symmetric key gives authorized members access to encrypted policy frames. Each receiver verifies the Ed25519 signature and its configured publisher grant for that scope. Use the full public key for peer and publisher provisioning. Grant `region` separately on each receiver that should accept regional records. Changing the domain or region is blocked while the name is in use by rules, checkpoint floors or publisher grants.
+Domain and region names accept 1–15 lowercase letters, digits, underscores, or hyphens. Both repeaters need the same dedicated sync key and reciprocal trust. Each receiver verifies its peer's session and independently checks the policy's Ed25519 signature and scope grant. Use the full public key for peer and publisher provisioning. Grant `region` separately on each receiver that should accept regional records. Changing the domain or region is blocked while the name is in use by rules, checkpoint floors or publisher grants.
+
+On A, start the exchange with `rules peer connect domain <repeater-B-public-key>`. Check `rules peer status domain <peer-public-key>` on both repeaters for `peer=authenticated`. The three handshake frames share the policy send budget, so establishing the session may take several minutes. A session expires after one hour or a reboot.
 
 | Scope | Where the rule can travel |
 | --- | --- |
 | `local` | The originating repeater only. |
-| `global:lab` | Trusted Hardened repeaters in the configured domain that can receive the unscoped policy flood. Check that the stock wildcard region allows flood traffic for this scope. |
+| `global:lab` | Authenticated Hardened peers in the configured domain over direct RF links. Check that the stock wildcard region allows flood traffic for this scope. |
 | `region:labnorth` | Trusted Hardened repeaters with the same domain and configured policy region, reached over the matching stock region transport. |
 
 For a regional deployment, use the same matching region in each repeater's stock region map and allow floods in it. Example USB commands:
@@ -299,15 +301,18 @@ Shared writes queue sync automatically. The explicit `rules sync` command requeu
 sequenceDiagram
     participant A as Origin repeater A
     participant B as Trusted repeater B
+    A->>B: Signed challenge
+    B->>A: Signed response
+    A->>B: Signed confirmation
     A->>A: Commit rule or deletion and sign the record
-    A->>B: Flood one AES-128-GCM encrypted update
-    B->>B: Check region, decrypt, verify trusted origin and revision
+    A->>B: Send update over the authenticated peer session
+    B->>B: Check scope, sender, origin signature and revision
     B->>B: Commit newer state or ignore a duplicate
-    Note over A,B: After a partition, run rules sync on a repeater with current state
-    A->>B: Replay stored shared state including deletions
+    Note over A,B: After a partition, reconnect peers and run rules sync
+    A->>B: Resend stored shared state including deletions
 ```
 
-The policy record is signed with Ed25519 and bound to its origin, domain, and scope. The radio packet carries one record in a Hardened control frame, encrypted with AES-128-GCM using a 12-byte nonce and 12-byte authentication tag. A short origin prefix selects candidate keys. Only full signature verification authorizes the record. Peers reject stale updates to a known rule and retain signed deletion records to prevent resurrection. A repeater that already has an update does not re-flood it on receipt. For a multi-hop repair, run `rules sync` on intermediate trusted repeaters holding current state. Stock repeater interoperability for ordinary traffic is separate from participation in this sync protocol.
+The policy record is signed with Ed25519 and bound to its origin, domain, and scope. Hardened control frames carry one record under a directional AES-128-GCM session key. Each recipient verifies the original publisher's full signature. For a multi-hop path, configure an authenticated session on each link and use `rules relay allow <key>` on each receiver that accepts third-party records from that intermediate peer. Use matched Hardened firmware on every participant in policy exchange. Ordinary traffic retains the stock protocol.
 
 `rules sync.key off` disables sync and keeps accepted rules. Use `rules publisher retire <scope> <key>` over USB on each affected repeater to durably remove a publisher's rules for that scope and refuse later signed copies. `rules untrust` removes peer trust. An offline repeater can continue using its last accepted policy during a partition.
 

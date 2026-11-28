@@ -122,7 +122,7 @@ The repeater stores no packet journal. `log stop` reports that logging is disabl
 The repeater checks each committed policy snapshot and its revision record at boot. If the expected policy is missing or corrupt, RF forwarding and bridge exports stop. The USB CLI and enrolled local management remain available.
 
 1. Run `rules recovery` over USB to see the storage status and last readable revision.
-2. Use `rules recover <last-revision>` to restore the last readable policy explicitly. If no snapshot can be used, `rules recover empty` initializes an empty managed policy. This clears managed rules, policy sync settings, and secondary room settings. The primary identity, administrator ACL, and base filters are stored separately.
+2. Use `rules recover <last-revision>` to restore the last readable policy explicitly. If no snapshot can be used, `rules recover empty` initializes an empty managed policy. Either recovery command clears the sync key. The empty recovery also clears managed rules and secondary room settings. The primary identity, administrator ACL, and base filters are stored separately.
 3. Review or reprovision the policy, then run `rules resume` over USB. The hold survives reboot and stays in effect until resume succeeds.
 
 Valid snapshots from older builds are recorded on upgrade. Interrupted writes preserve the previous sealed snapshot. If the boot checks cannot establish which policy is safe to use, forwarding stays held and the repeater reports recovery is required.
@@ -152,6 +152,7 @@ rules subnet [name]
 rules authority <64-hex-public-key>
 rules publisher grant|retire global|region|subnet <64-hex-public-key>
 rules relay allow|remove <64-hex-repeater-public-key>
+rules peer connect|disconnect|status domain|subnet <64-hex-repeater-public-key>
 rules sync status
 rules sync
 rules checkpoint
@@ -162,7 +163,11 @@ Configure the domain, sync key, and authorized origins over USB on each particip
 
 Shared updates are signed with the originating repeater key after it authorizes the change. Each receiving repeater checks the scope grant and verifies the origin signature independently. Sync messages are encrypted with AES-128-GCM and carry one update per packet. Local rules stay on their repeater. A write queues shared updates, and `rules sync` resends active rules and deletion records after a partition. Senders queue at most one update per minute. For a multi-hop reconciliation, run sync on intermediate repeaters that already hold the current state.
 
-`rules subnet <name>` assigns this repeater to one named managed subnet, independently of its MeshCore region. `rules authority <key>` reports peer, relay, and publisher settings. Peer and relay entries are configured independently for authenticated peer transport. Existing regional and global sync verifies the original publisher. Authenticated relay transport and subnet mode propagation are tracked separately. [Peer authentication](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/19) · [Subnet mode propagation](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/20)
+`rules subnet <name>` assigns this repeater to one named managed subnet, independently of its MeshCore region. `rules authority <key>` reports peer, relay, and publisher settings. For shared global and regional rules, use a `domain` session. A `subnet` session authenticates peers in the configured subnet. Mode propagation follows separately. [Subnet mode propagation](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/20)
+
+On both repeaters, set the same dedicated random sync key and trust the other's full public key. In Locked, the peer also needs a repeater allow rule. Use `rules peer connect` on one end and wait for `rules peer status` to show `peer=authenticated` at both ends. The handshake uses three signed proofs, reserves a durable freshness epoch on first use after boot, and expires pending state after four minutes. Active sessions expire after one hour. If the last proof is lost, disconnect on both ends before reconnecting. A repeater holds up to eight sessions. After restoring a policy snapshot with USB recovery, provision a fresh dedicated sync key on participating nodes before reconnecting.
+
+Session frames go directly between authenticated peers. For a peer to carry another publisher's signed rules or checkpoints, grant that peer `rules relay allow <key>` on the receiver. The receiver still verifies the original publisher and scope. Peer handshakes, rule updates, and checkpoint frames use the same one-frame-per-minute transmit budget. A session and its sequence counters are volatile. Reconnect and run `rules sync` after a reboot or an expired session.
 
 Grant a full origin key separately for each scope where a receiving repeater should accept its signatures. A repeater's own key can issue global and regional rules after configuring the corresponding scope. Subnet publishing requires its own grant. On upgrade, any previously trusted keys retain their existing global or regional publishing permissions. New `rules trust` entries grant peer permission only.
 

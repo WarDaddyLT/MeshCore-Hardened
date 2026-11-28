@@ -1,7 +1,5 @@
 #include "MyMesh.h"
 #include <algorithm>
-#include <AES.h>
-#include <GCM.h>
 
 /* ------------------------------ Config -------------------------------- */
 
@@ -57,12 +55,7 @@
 #define CLI_REPLY_DELAY_MILLIS      600
 
 static constexpr uint8_t PolicyType = 0xA1;
-static constexpr size_t PolicyNonceSize = 12;
-static constexpr size_t PolicyTagSize = 12;
-static constexpr size_t PolicyHeaderSize = 1 + PolicyNonceSize;
 static constexpr size_t PolicyDataSize = RuleStore::FingerprintSize + RuleStore::WireSize;
-static constexpr size_t PolicyPayloadSize = PolicyHeaderSize + PolicyDataSize + PolicyTagSize;
-static_assert(PolicyPayloadSize <= MAX_PACKET_PAYLOAD, "Policy update must fit one control packet");
 
 using savemesh::matchCommand;
 using savemesh::matchesValue;
@@ -450,8 +443,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
     ++_filter_drops;
     return false;
   }
-  if (_rules.strictTransit() && packet->getPayloadType() != PAYLOAD_TYPE_ADVERT
-      && packet != _verified_policy_forward) {
+  if (_rules.strictTransit() && packet->getPayloadType() != PAYLOAD_TYPE_ADVERT) {
     if (_rules.mode() == RuleStore::Locked) ++_locked_drops;
     else ++_identity_drops;
     return false;
@@ -658,9 +650,10 @@ bool MyMesh::shouldExportToBridge(mesh::Packet* packet) {
       return false;
     }
   }
-  if (packet->getPayloadType() == PAYLOAD_TYPE_CONTROL && packet->payload_len == PolicyPayloadSize
+  if (packet->getPayloadType() == PAYLOAD_TYPE_CONTROL && packet->payload_len
       && packet->payload[0] == PolicyType) return false;
   if (isCheckpointPacket(*packet)) return false;
+  if (isPeerHandshake(*packet)) return false;
   if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
       && (!verifyReceivedAdvert(*packet) || !allowVerifiedAdvert(*packet, false))) return false;
   return !shouldDropByRate(packet, _bridge_forward_budget);
@@ -710,7 +703,11 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
     receiveCheckpointPacket(*pkt);
     return ACTION_RELEASE;
   }
-  if (pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL && pkt->payload_len == PolicyPayloadSize
+  if (isPeerHandshake(*pkt)) {
+    receivePeerHandshake(*pkt);
+    return ACTION_RELEASE;
+  }
+  if (pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL && pkt->payload_len
       && pkt->payload[0] == PolicyType) {
     return receivePolicyUpdate(pkt);
   }
@@ -719,69 +716,55 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
 }
 
 mesh::DispatcherAction MyMesh::receivePolicyUpdate(mesh::Packet* packet) {
-  if (!packet->isRouteFlood() || !recv_pkt_region || !packet->received_over_radio
-      || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)
-      || getTables()->wasSeen(packet)) return ACTION_RELEASE;
   if (_next_policy_commit && !millisHasNowPassed(_next_policy_commit)) return ACTION_RELEASE;
-  if (!_sync_work.admit(millis())) return ACTION_RELEASE;
 
-  GCM<AES128> cipher;
-  if (!cipher.setKey(_rules.syncKey(), CIPHER_KEY_SIZE) || !cipher.setIV(packet->payload + 1, PolicyNonceSize)) {
-    return ACTION_RELEASE;
-  }
-  cipher.addAuthData(packet->payload, 1);
   uint8_t data[PolicyDataSize];
-  cipher.decrypt(data, packet->payload + PolicyHeaderSize, sizeof(data));
-  if (!cipher.checkTag(packet->payload + PolicyHeaderSize + sizeof(data), PolicyTagSize)) return ACTION_RELEASE;
+  auto* session = openPolicyFrame(*packet, PolicyPeerSession::Context::Domain, data, sizeof(data));
+  if (!session) return ACTION_RELEASE;
   RuleStore::Rule rule{};
   memcpy(&rule, data + RuleStore::FingerprintSize, RuleStore::WireSize);
-  if (rule.scope == RuleStore::Region && (recv_pkt_region->isWildcard()
-      || strcmp(recv_pkt_region->name, _rules.scopeName(RuleStore::Region)) != 0)) return ACTION_RELEASE;
-  auto result = _rules.mergeRule(rule, data, self_id);
-  if (result == RuleStore::Rejected) return ACTION_RELEASE;
-  getTables()->markSeen(packet);
-  if (result == RuleStore::Current) return ACTION_RELEASE;
-  _next_policy_commit = futureMillis(2000);
-  _verified_policy_forward = packet;
-  const auto action = routeRecvPacket(packet);
-  _verified_policy_forward = nullptr;
-  return action;
+  if (rule.scope != RuleStore::Global && rule.scope != RuleStore::Region) return ACTION_RELEASE;
+  if (!policyScopeReceived(*packet, static_cast<RuleStore::Scope>(rule.scope))) return ACTION_RELEASE;
+  const auto* requiredOrigin = _rules.relayAllowed(session->peer()) ? nullptr : session->peer();
+  if (_rules.mergeRule(rule, data, self_id, requiredOrigin) == RuleStore::Changed) {
+    _next_policy_commit = futureMillis(2000);
+    queuePolicySync();
+  }
+  return ACTION_RELEASE;
 }
 
 void MyMesh::sendPolicyUpdate() {
-  if (!_rules.forwardingAllowed()) return;
-  if (_sync_cursor >= RuleStore::Capacity || _mgr->getOutboundTotal() != 0
+  if (!_rules.forwardingAllowed() || _sync_cursor >= RuleStore::Capacity || _mgr->getOutboundTotal()
       || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)
       || (_next_policy_tx && !millisHasNowPassed(_next_policy_tx))) return;
-  for (; _sync_cursor < RuleStore::Capacity; ++_sync_cursor) {
+  constexpr size_t MaxPeers = sizeof(_policy_peers) / sizeof(_policy_peers[0]);
+  bool eligiblePeer = false;
+  for (const auto& session : _policy_peers) {
+    if (session.active() && session.context() == PolicyPeerSession::Context::Domain) eligiblePeer = true;
+  }
+  if (!eligiblePeer) return;
+
+  for (; _sync_cursor < RuleStore::Capacity; ++_sync_cursor, _sync_peer_cursor = 0) {
     const auto* rule = _rules.exportRule(_sync_cursor);
-    if (!rule || !_rules.publisherAllowed(static_cast<RuleStore::Scope>(rule->scope), rule->origin, self_id)) continue;
+    if (!rule) continue;
+    const auto scope = static_cast<RuleStore::Scope>(rule->scope);
     TransportKey transport{};
-    if (rule->scope == RuleStore::Region) {
-      auto region = region_map.findByName(_rules.scopeName(RuleStore::Region));
-      if (!region || region_map.getTransportKeysFor(*region, &transport, 1) != 1 || transport.isNull()) continue;
+    if (!_rules.publisherAllowed(scope, rule->origin, self_id) || !checkpointTransport(scope, transport)) continue;
+    for (; _sync_peer_cursor < MaxPeers; ++_sync_peer_cursor) {
+      auto& session = _policy_peers[_sync_peer_cursor];
+      if (!session.active() || session.context() != PolicyPeerSession::Context::Domain
+          || memcmp(session.peer(), rule->origin, PUB_KEY_SIZE) == 0) continue;
+      uint8_t data[PolicyDataSize];
+      memcpy(data, rule->origin, RuleStore::FingerprintSize);
+      memcpy(data + RuleStore::FingerprintSize, rule, RuleStore::WireSize);
+      if (queuePolicyFrame(session, PolicyType, data, sizeof(data), transport)) ++_sync_peer_cursor;
+      return;
     }
-    uint8_t payload[PolicyPayloadSize];
-    payload[0] = PolicyType;
-    getRNG()->random(payload + 1, PolicyNonceSize);
-    GCM<AES128> cipher;
-    if (!cipher.setKey(_rules.syncKey(), CIPHER_KEY_SIZE) || !cipher.setIV(payload + 1, PolicyNonceSize)) return;
-    cipher.addAuthData(payload, 1);
-    uint8_t data[PolicyDataSize];
-    memcpy(data, rule->origin, RuleStore::FingerprintSize);
-    memcpy(data + RuleStore::FingerprintSize, rule, RuleStore::WireSize);
-    cipher.encrypt(payload + PolicyHeaderSize, data, sizeof(data));
-    cipher.computeTag(payload + PolicyHeaderSize + sizeof(data), PolicyTagSize);
-    auto packet = createControlData(payload, sizeof(payload));
-    if (!packet) return;
-    ++_sync_cursor;
-    _next_policy_tx = futureMillis(60 * 1000);
-    sendFloodScoped(transport, packet, 0, _prefs.path_hash_mode + 1);
-    return;
   }
 }
 
 bool MyMesh::handleSyncCommand(const char* command, char* reply, bool usb, bool can_write) {
+  if (handlePeerCommand(command, reply, can_write)) return true;
   if (handleAuthorityCommand(command, reply, usb, can_write)) return true;
   if (matchesValue(command, "sync status")) {
     snprintf(reply, 150, "domain=%s region=%s key=%s sync=%s", _rules.scopeName(RuleStore::Global),
@@ -796,7 +779,7 @@ bool MyMesh::handleSyncCommand(const char* command, char* reply, bool usb, bool 
       strcpy(reply, "Err - configure a policy domain and key");
     }
     else {
-      _sync_cursor = 0;
+      queuePolicySync();
       strcpy(reply, "OK - policy sync queued");
     }
     return true;
@@ -813,6 +796,7 @@ bool MyMesh::handleSyncCommand(const char* command, char* reply, bool usb, bool 
             && !mesh::Utils::isZeroes(key, sizeof(key)))) && _rules.setSyncKey(key);
     if (ok) {
       _checkpoint_transfer = CheckpointTransfer::Idle;
+      for (auto& session : _policy_peers) session.reset();
       if (mesh::Utils::isZeroes(key, sizeof(key))) _sync_cursor = RuleStore::Capacity;
     }
     strcpy(reply, ok ? "OK" : "Err - use USB with a private 16-byte sync key");
@@ -823,7 +807,14 @@ bool MyMesh::handleSyncCommand(const char* command, char* reply, bool usb, bool 
   else if (matchCommand(command, "region", &arg)) scope = RuleStore::Region;
   else scope = RuleStore::Local;
   if (scope != RuleStore::Local) {
+    const bool changed = strcmp(_rules.scopeName(scope), arg) != 0;
     bool ok = usb && _rules.setScope(scope, arg);
+    if (ok && changed) {
+      for (auto& session : _policy_peers) {
+        if (session.context() == PolicyPeerSession::Context::Domain) session.reset();
+      }
+      _checkpoint_transfer = CheckpointTransfer::Idle;
+    }
     strcpy(reply, ok ? "OK" : "Err - use USB and an unused valid scope");
     return true;
   }
@@ -845,7 +836,13 @@ bool MyMesh::handleAuthorityCommand(const char* command, char* reply, bool usb, 
       const auto* name = _rules.scopeName(RuleStore::Subnet);
       snprintf(reply, 150, "subnet=%s", *name ? name : "none");
     } else {
+      const bool changed = strcmp(_rules.scopeName(RuleStore::Subnet), args) != 0;
       const bool ok = usb && _rules.setScope(RuleStore::Subnet, args);
+      if (ok && changed) {
+        for (auto& session : _policy_peers) {
+          if (session.context() == PolicyPeerSession::Context::Subnet) session.reset();
+        }
+      }
       strcpy(reply, ok ? "OK" : "Err - use USB with an unused valid subnet name");
     }
     return true;
@@ -891,7 +888,7 @@ bool MyMesh::handleAuthorityCommand(const char* command, char* reply, bool usb, 
     const bool ok = publisher ? _rules.setPublisher(scope, key, grant) : _rules.setRelay(key, grant);
     if (ok && publisher && !grant) {
       _checkpoint_transfer = CheckpointTransfer::Idle;
-      if (_sync_cursor < RuleStore::Capacity) _sync_cursor = 0;
+      if (_sync_cursor < RuleStore::Capacity) queuePolicySync();
     }
     strcpy(reply, ok ? "OK" : "Err - scope unavailable, issuer retired or authority storage unavailable");
   }
@@ -1809,6 +1806,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
         _rules.handleRecoveryCommand(args, reply);
         if (strncmp(reply, "OK", 2) == 0 && matchCommand(args, "recover", &recovery_arg)) {
           _checkpoint_transfer = CheckpointTransfer::Idle;
+          for (auto& session : _policy_peers) session.reset();
+          _peer_epoch = 0;
+          _peer_nonce_counter = 0;
+          _next_peer_epoch_attempt = 0;
           _probation.begin(_rules.probationState(), uptime_millis);
           _rules.restartFreezeTimer(uptime_millis);
         }
@@ -1872,7 +1873,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     if (_rules.strictTransit() && previousMode != _rules.mode()) {
       while (_mgr->getOutboundTotal()) releasePacket(_mgr->removeOutboundByIdx(0));
     }
-    if (sync_requested) _sync_cursor = 0;
+    if (sync_requested) queuePolicySync();
     return;
   }
   if (client && !client->isAdmin()) {
@@ -1996,6 +1997,7 @@ void MyMesh::loop() {
 
   mesh::Mesh::loop();
   sendNeighbourNotice();
+  servicePolicyPeers();
   sendCheckpointPacket();
   sendPolicyUpdate();
 

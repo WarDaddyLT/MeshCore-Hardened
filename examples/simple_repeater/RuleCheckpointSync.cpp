@@ -1,19 +1,10 @@
 #include "MyMesh.h"
 #include "CliParse.h"
-#include <AES.h>
-#include <GCM.h>
 
 namespace {
 constexpr uint8_t RootType = 0xA2;
 constexpr uint8_t RecordType = 0xA3;
-constexpr size_t NonceSize = 12;
-constexpr size_t HeaderSize = 1 + NonceSize;
-constexpr size_t TagSize = 12;
-constexpr size_t RootSize = HeaderSize + sizeof(RuleStore::Checkpoint) + TagSize;
-constexpr size_t RecordSize = HeaderSize + 1 + RuleStore::WireSize + TagSize;
-static_assert(RootSize <= MAX_PACKET_PAYLOAD && RecordSize <= MAX_PACKET_PAYLOAD, "Checkpoint frames must fit LoRa");
 static_assert(RuleStore::Capacity < 32, "Checkpoint receipt mask must fit in 32 bits");
-constexpr unsigned long TransferIntervalMs = 60000;
 constexpr unsigned long ReceiveWindowMs = 30 * 60000;
 }
 
@@ -54,39 +45,34 @@ void MyMesh::handleCheckpointCommand(const char* args, char* reply, bool canWrit
   }
   _checkpoint_transfer = CheckpointTransfer::Sending;
   _checkpoint_cursor = 0;
-  if (_sync_cursor < RuleStore::Capacity) _sync_cursor = 0;
+  _checkpoint_peer_cursor = 0;
+  memset(_checkpoint_sender, 0, sizeof(_checkpoint_sender));
+  if (_sync_cursor < RuleStore::Capacity) queuePolicySync();
   strcpy(reply, "OK - checkpoint committed and queued");
 }
 
 void MyMesh::receiveCheckpointPacket(mesh::Packet& packet) {
   const bool root = packet.payload[0] == RootType;
-  if (packet.payload_len != (root ? RootSize : RecordSize) || !packet.isRouteFlood() || !recv_pkt_region
-      || !packet.received_over_radio || !_rules.forwardingAllowed()
-      || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)) return;
   if (_checkpoint_transfer != (root ? CheckpointTransfer::Idle : CheckpointTransfer::Receiving)) return;
-  if (!_sync_work.admit(millis())) return;
-
-  GCM<AES128> cipher;
-  if (!cipher.setKey(_rules.syncKey(), CIPHER_KEY_SIZE) || !cipher.setIV(packet.payload + 1, NonceSize)) return;
-  cipher.addAuthData(packet.payload, 1);
-  if (!root) cipher.addAuthData(reinterpret_cast<const uint8_t*>(&_checkpoint), sizeof(_checkpoint));
   uint8_t data[1 + RuleStore::WireSize];
-  const size_t size = packet.payload_len - HeaderSize - TagSize;
-  cipher.decrypt(data, packet.payload + HeaderSize, size);
-  if (!cipher.checkTag(packet.payload + HeaderSize + size, TagSize)) return;
-
+  const size_t size = root ? sizeof(_checkpoint) : sizeof(data);
+  auto* session = openPolicyFrame(packet, PolicyPeerSession::Context::Domain, data, size,
+                                  root ? nullptr : &_checkpoint, root ? 0 : sizeof(_checkpoint));
+  if (!session) return;
   if (root) {
     memcpy(&_checkpoint, data, sizeof(_checkpoint));
-    if (_checkpoint.scope == RuleStore::Region && (recv_pkt_region->isWildcard()
-        || strcmp(recv_pkt_region->name, _rules.scopeName(RuleStore::Region)) != 0)) return;
-    if (_rules.checkCheckpoint(_checkpoint, self_id) != RuleStore::Changed) return;
+    if (!policyScopeReceived(packet, static_cast<RuleStore::Scope>(_checkpoint.scope))
+        || (memcmp(_checkpoint.origin, session->peer(), PUB_KEY_SIZE) != 0 && !_rules.relayAllowed(session->peer()))
+        || _rules.checkCheckpoint(_checkpoint, self_id) != RuleStore::Changed) return;
+    memcpy(_checkpoint_sender, session->peer(), PUB_KEY_SIZE);
     _checkpoint_transfer = CheckpointTransfer::Receiving;
     _checkpoint_received = 0;
     _checkpoint_expiry = futureMillis(ReceiveWindowMs);
   } else {
     if (millisHasNowPassed(_checkpoint_expiry)) { _checkpoint_transfer = CheckpointTransfer::Idle; return; }
-    if (_checkpoint.scope == RuleStore::Region && (recv_pkt_region->isWildcard()
-        || strcmp(recv_pkt_region->name, _rules.scopeName(RuleStore::Region)) != 0)) return;
+    if (memcmp(_checkpoint_sender, session->peer(), PUB_KEY_SIZE) != 0
+        || !policyScopeReceived(packet, static_cast<RuleStore::Scope>(_checkpoint.scope))
+        || (memcmp(_checkpoint.origin, session->peer(), PUB_KEY_SIZE) != 0 && !_rules.relayAllowed(session->peer()))) return;
     const uint8_t index = data[0];
     if (index >= _checkpoint.count || (_checkpoint_received & (uint32_t(1) << index))) return;
     auto& record = _checkpoint_records[index];
@@ -100,7 +86,8 @@ void MyMesh::receiveCheckpointPacket(mesh::Packet& packet) {
   if (_rules.installCheckpoint(_checkpoint, _checkpoint_records, _checkpoint.count, self_id) == RuleStore::Changed) {
     _checkpoint_transfer = CheckpointTransfer::Sending;
     _checkpoint_cursor = 0;
-    if (_sync_cursor < RuleStore::Capacity) _sync_cursor = 0;
+    _checkpoint_peer_cursor = 0;
+    if (_sync_cursor < RuleStore::Capacity) queuePolicySync();
   }
 }
 
@@ -125,27 +112,31 @@ void MyMesh::sendCheckpointPacket() {
     }
   }
 
-  const bool root = _checkpoint_cursor == 0;
-  uint8_t payload[RecordSize];
-  uint8_t data[1 + RuleStore::WireSize];
-  const size_t size = root ? sizeof(_checkpoint) : sizeof(data);
-  payload[0] = root ? RootType : RecordType;
-  if (root) {
-    memcpy(data, &_checkpoint, size);
-  } else {
-    data[0] = _checkpoint_cursor - 1;
-    memcpy(data + 1, &_checkpoint_records[data[0]], RuleStore::WireSize);
+  constexpr size_t MaxPeers = sizeof(_policy_peers) / sizeof(_policy_peers[0]);
+  for (; _checkpoint_peer_cursor < MaxPeers; ++_checkpoint_peer_cursor, _checkpoint_cursor = 0) {
+    auto& session = _policy_peers[_checkpoint_peer_cursor];
+    const bool root = _checkpoint_cursor == 0;
+    if (!session.active() || session.context() != PolicyPeerSession::Context::Domain
+        || memcmp(session.peer(), _checkpoint_sender, PUB_KEY_SIZE) == 0
+        || memcmp(session.peer(), _checkpoint.origin, PUB_KEY_SIZE) == 0
+        || (!root && memcmp(session.peer(), _checkpoint_target, PUB_KEY_SIZE) != 0)) continue;
+    uint8_t data[1 + RuleStore::WireSize];
+    size_t size = sizeof(_checkpoint);
+    if (root) {
+      memcpy(_checkpoint_target, session.peer(), PUB_KEY_SIZE);
+      memcpy(data, &_checkpoint, size);
+    } else {
+      size = sizeof(data);
+      data[0] = _checkpoint_cursor - 1;
+      memcpy(data + 1, &_checkpoint_records[data[0]], RuleStore::WireSize);
+    }
+    if (queuePolicyFrame(session, root ? RootType : RecordType, data, size, transport,
+                         root ? nullptr : &_checkpoint, root ? 0 : sizeof(_checkpoint))
+        && ++_checkpoint_cursor > _checkpoint.count) {
+      _checkpoint_cursor = 0;
+      ++_checkpoint_peer_cursor;
+    }
+    return;
   }
-  getRNG()->random(payload + 1, NonceSize);
-  GCM<AES128> cipher;
-  if (!cipher.setKey(_rules.syncKey(), CIPHER_KEY_SIZE) || !cipher.setIV(payload + 1, NonceSize)) return;
-  cipher.addAuthData(payload, 1);
-  if (!root) cipher.addAuthData(reinterpret_cast<const uint8_t*>(&_checkpoint), sizeof(_checkpoint));
-  cipher.encrypt(payload + HeaderSize, data, size);
-  cipher.computeTag(payload + HeaderSize + size, TagSize);
-  auto* packet = createControlData(payload, HeaderSize + size + TagSize);
-  if (!packet) return;
-  _next_policy_tx = futureMillis(TransferIntervalMs);
-  sendFloodScoped(transport, packet, 0, _prefs.path_hash_mode + 1);
-  if (++_checkpoint_cursor > _checkpoint.count) _checkpoint_transfer = CheckpointTransfer::Idle;
+  _checkpoint_transfer = CheckpointTransfer::Idle;
 }
