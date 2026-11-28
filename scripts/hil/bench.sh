@@ -17,7 +17,7 @@ Usage: scripts/hil/bench.sh <build|build-admin|prepare|list|preflight|run> [runn
   prepare    Install test dependencies, pin the four USB keys, and check preflight.
   list       List USB devices.
   preflight  Check the pinned USB identities and settings without transmitting.
-  run        Run the actor scenario. Requires --isolated-rf.
+  run        Run the actor scenario by default. Accepts --suite or --all.
 HELP
         exit 0
         ;;
@@ -65,5 +65,12 @@ case "$action" in
         ;;
     list) exec "$bench_python" "$bench_dir/run.py" --list "$@" ;;
     preflight) exec "$bench_python" "$bench_dir/run.py" --preflight "$@" ;;
-    run) exec "$bench_python" "$bench_dir/run.py" --suite actor "$@" ;;
+    run)
+        for option in "$@"; do
+            case "$option" in --suite|--suite=*|--all)
+                exec "$bench_python" "$bench_dir/run.py" "$@" ;;
+            esac
+        done
+        exec "$bench_python" "$bench_dir/run.py" --suite actor "$@"
+        ;;
 esac

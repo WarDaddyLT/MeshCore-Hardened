@@ -6,7 +6,7 @@ The actor scenario checks whether two Hardened repeaters drop a banned device's 
 | --- | --- | --- |
 | R1 | RAK 1W | MeshCore Hardened repeater with `rules device` |
 | R2 | ThinkNode M5 | MeshCore Hardened repeater with `rules device` |
-| ADMIN | Wio Tracker e-ink | USB-capable admin bench build of MeshCore Companion |
+| ADMIN | Wio Tracker L1 Pro e-ink | USB-capable admin bench build of MeshCore Companion |
 | ACTOR | T-Echo Lite Kit | Stock MeshCore USB Companion |
 
 ## Run from CLion
@@ -27,7 +27,7 @@ To run directly with a Python Run Configuration:
 
 1. Install the requirements with `python -m pip install -r scripts/hil/requirements.txt`. Configure that Python interpreter in the CLion run configuration, or run the same commands in CLion's Terminal.
 2. Use the repository root as the working directory and `scripts/hil/run.py` as the script. Run it with `--list` to see USB selectors.
-3. Copy `hil_config.example.json` to `hil_config.local.json` in this directory. Fill in the stable selectors. On Linux, `"by_id": "/dev/serial/by-id/…"` can replace a serial number or location. You may record a known artifact's source commit as `firmware_git_sha` in each role. Run with `--identify` and pin the public keys in the local file after checking the devices.
+3. Copy `hil_config.example.json` to `hil_config.local.json` in this directory. Fill in the stable selectors. On Linux, `"by_id": "/dev/serial/by-id/…"` can replace a serial number or location. Record the flashed artifact's source commit and SHA-256 as `firmware_git_sha` and `firmware_sha256` in each role. Run with `--identify` and pin the public keys in the local file after checking the devices.
 4. Configure the same legal frequency, bandwidth, spreading factor and coding rate on all four devices. Keep both repeaters in Normal with an empty transmit queue and one free rule slot each. For this scenario, either use an accepted bench region on all devices or use an isolated setup that allows the unscoped adverts from both companions. Disable companion repeating and close serial monitors and apps that hold any bench port.
 5. Run with `--preflight`. Match the report's settings with your isolated RF setup.
 6. Run with `--suite actor --isolated-rf --report out/hil/actor`. Use an RF enclosure or controlled attenuation so the four radios can hear the intended test paths without sending adverts to a public mesh. The flag confirms isolation, legal settings and authorization to add and remove the temporary denies.
@@ -52,4 +52,10 @@ The runner writes JSON, JUnit XML and Markdown reports. The JSON includes both r
 
 Nearby receivers may hear a source directly. The runner requires a matching last-hop path prefix and transmit counter change to verify each repeater's forwarding. Poor RF visibility or unrelated traffic can make the result inconclusive. A BLE-only companion may expose a serial port while lacking the wired Companion protocol. A missing USB response leaves the run unverified.
 
-`--smoke` is an alias for the actor scenario. This first scenario covers attributable blacklist forwarding in Normal. Full ACL, filtering, security, sync, identity, and Protected/Locked RF coverage are still pending. The runner sends no malformed or synthetic RF frames and never flashes a device.
+`--smoke` is an alias for the actor scenario. Run `./scripts/hil/bench.sh run --suite filtering --isolated-rf` to check Public group-text forwarding, the Public filter drop counter, and unaffected signed ADMIN adverts. Both companions need their stock Public channel in slot 0 and both repeaters must start with Public filtering off. The scenario records RF routing evidence and leaves the companion app inbox alone.
+
+Run `./scripts/hil/bench.sh run --suite security --isolated-rf` to check initial Protected probation, Locked admission, and ADMIN forwarding. ACTOR must start unenrolled and without an existing probation entry. Use a fresh bench configuration for this case and synchronize the radios' clocks. The test restores Normal and removes its temporary allow rules. Protected can retain ACTOR's probation record.
+
+Run `./scripts/hil/bench.sh run --suite sync --isolated-rf` to verify signed subnet mode propagation and applied-policy confirmation. Both repeaters must already be onboarded into the same isolated test subnet, authenticated to each other, and on the same signed Normal revision. Both need R1's subnet publishing grant. The run publishes Protected on R1, checks the committed revision on R2, requests authenticated confirmation, and restores signed Normal on both.
+
+`./scripts/hil/bench.sh run --all --isolated-rf` runs the implemented cases and records outstanding release coverage as skipped. The reports include individual results. Stock remote ACL, the full filter matrix, shared rules and deletion sync, onboarding, Android and room identity, signed neighbour notices, and the baseline comparison remain release work.
