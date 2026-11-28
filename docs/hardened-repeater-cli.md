@@ -191,6 +191,15 @@ When a domain session reconnects, shared rules and retained deletions are queued
 
 Manual onboarding works without an available peer. It preserves accepted shared rules and their deletion state. Later authenticated reconciliation applies verified shared updates while preserving the local starting policy.
 
+### Onboarding from a peer
+
+1. Over USB, configure the joining repeater's subnet and matching domain and region names. Provision reciprocal peer trust, the common sync key, and the publisher keys for the shared rules and subnet mode. Grant the snapshot provider subnet publishing authority on both repeaters. Grant the provider global or regional publishing authority on the joining repeater for any corresponding deletion floors it attests.
+2. Connect the joining repeater to the provider with `rules peer connect subnet <provider-key>`. Wait for both devices to report an authenticated session. The provider must have completed its own onboarding.
+3. Run `rules onboarding peer fetch <provider-key>` on the joining repeater. Check `rules onboarding peer` for progress. Every block counts against the existing policy airtime budget. A full transfer can take more than half an hour.
+4. Wait for `peer=staged`. Inspect the policy and use the same review and commit commands as manual onboarding. Receiving a snapshot leaves transit held.
+
+The requested snapshot binds the signature to the requesting repeater, a fresh request, and the configured scopes. It contains the signed subnet mode, shared rules and deletion state. Local settings stay on the source. The joining repeater verifies original signatures and scope grants and keeps its own policy and newer accepted state. The provider stops a transfer if the shared contents change. A missing block, disconnected session, or reboot before staging leaves the receiving policy held. Use `rules onboarding peer cancel` to clear the current transfer before retrying. The compact LoRa-E5 Mini build supports manual onboarding.
+
 Grant a full origin key separately for each scope where a receiving repeater should accept its signatures. A repeater's own key can issue global and regional rules after configuring the corresponding scope. Subnet publishing requires its own grant. On upgrade, any previously trusted keys retain their existing global or regional publishing permissions. New `rules trust` entries grant peer permission only.
 
 To retire an unavailable or compromised publisher, run `rules publisher retire <scope> <key>` on each affected repeater over USB. This atomically removes that key's rules for the scope and blocks its later updates and checkpoints, including delayed copies. The retired key cannot be granted the same scope again. Grant a fresh key and reissue the intended rules to rotate it. Peer trust and other scope grants remain independent. The authority table holds 12 keys including retired entries. Retirements are local durable operations and require provisioning on each affected repeater.

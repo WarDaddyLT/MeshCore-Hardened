@@ -48,6 +48,40 @@ public:
     uint8_t mode;
     uint8_t signature[SIGNATURE_SIZE];
   };
+  struct OriginFloor {
+    uint8_t key[PUB_KEY_SIZE];
+    uint8_t global[4];
+    uint8_t region[4];
+
+    const uint8_t* forScope(Scope scope) const { return scope == Global ? global : region; }
+    uint8_t* forScope(Scope scope) { return scope == Global ? global : region; }
+  };
+
+  struct PeerPolicy {
+    char subnet[ScopeNameSize];
+    char domain[ScopeNameSize];
+    char region[ScopeNameSize];
+    SubnetModeRecord mode;
+    OriginFloor floors[9];
+    Rule rules[Capacity];
+
+    static size_t wireSize(uint8_t count) { return offsetof(PeerPolicy, rules) + count * sizeof(Rule); }
+  };
+
+  struct PeerPolicyProof {
+    uint8_t request[16];
+    uint8_t revision[4];
+    uint8_t count;
+    uint8_t digest[32];
+    uint8_t signature[SIGNATURE_SIZE];
+  };
+  bool exportPeerPolicy(PeerPolicy& policy, PeerPolicyProof& proof, const mesh::LocalIdentity& node,
+                        const uint8_t* recipient) const;
+  bool peerPolicyMatches(const PeerPolicy& policy, uint8_t count) const;
+  bool verifyPeerPolicyProof(const PeerPolicyProof& proof, const uint8_t* provider,
+                             const mesh::Identity& node) const;
+  bool stagePeerPolicy(const PeerPolicy& policy, const PeerPolicyProof& proof, const uint8_t* provider,
+                       const mesh::Identity& node);
 
   void begin(FILESYSTEM* fs, const mesh::LocalIdentity& node);
   Decision decide(Subject subject, const uint8_t* key) const;
@@ -117,15 +151,6 @@ private:
   };
   static constexpr uint8_t scopePermission(Scope scope) { return uint8_t(1) << scope; }
 
-  struct OriginFloor {
-    uint8_t key[PUB_KEY_SIZE];
-    uint8_t global[4];
-    uint8_t region[4];
-
-    const uint8_t* forScope(Scope scope) const { return scope == Global ? global : region; }
-    uint8_t* forScope(Scope scope) { return scope == Global ? global : region; }
-  };
-
   struct Snapshot {
     uint8_t magic[4];
     uint8_t revision[4];
@@ -154,6 +179,8 @@ private:
     Authority authorities[12];
     uint8_t onboarding;
     SubnetModeRecord subnet_mode;
+    uint8_t import_provider[PUB_KEY_SIZE];
+    uint8_t import_revision[4];
     uint8_t digest[32];
   };
 
@@ -175,6 +202,8 @@ private:
   static size_t reserveRuleSlot(Snapshot& snapshot);
   static void signableBytes(const Snapshot& snapshot, const Rule& rule, uint8_t* bytes);
   static uint32_t checkpointFloor(const Snapshot& snapshot, const uint8_t* origin, Scope scope);
+  static void peerPolicyBytes(const Snapshot& snapshot, const PeerPolicyProof& proof,
+                              const uint8_t* recipient, uint8_t* bytes);
   static Authority* authorityFor(Snapshot& snapshot, const uint8_t* key);
   const Authority* authorityFor(const uint8_t* key) const;
   const char* parseScope(const char* input, uint8_t& scope) const;

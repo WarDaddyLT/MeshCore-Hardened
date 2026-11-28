@@ -657,6 +657,7 @@ bool MyMesh::shouldExportToBridge(mesh::Packet* packet) {
   if (isPeerHandshake(*packet)) return false;
   if (isSubnetModePacket(*packet)) return false;
   if (isSubnetStatusPacket(*packet)) return false;
+  if (isPeerOnboardingPacket(*packet)) return false;
   if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
       && (!verifyReceivedAdvert(*packet) || !allowVerifiedAdvert(*packet, false))) return false;
   return !shouldDropByRate(packet, _bridge_forward_budget);
@@ -716,6 +717,10 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
   }
   if (isSubnetStatusPacket(*pkt)) {
     receiveSubnetStatus(*pkt);
+    return ACTION_RELEASE;
+  }
+  if (isPeerOnboardingPacket(*pkt)) {
+    receivePeerOnboarding(*pkt);
     return ACTION_RELEASE;
   }
   if (pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL && pkt->payload_len
@@ -866,6 +871,7 @@ bool MyMesh::handleAuthorityCommand(const char* command, char* reply, bool usb, 
       const bool ok = usb && _rules.setScope(RuleStore::Subnet, args);
       if (ok && changed) {
         _onboarding_review_revision = 0;
+        clearPeerOnboarding();
         for (auto& session : _policy_peers) {
           if (session.context() == PolicyPeerSession::Context::Subnet) session.reset();
         }
@@ -1856,6 +1862,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
           _peer_nonce_counter = 0;
           _next_peer_epoch_attempt = 0;
           _onboarding_review_revision = 0;
+          clearPeerOnboarding();
           _probation.begin(_rules.probationState(), uptime_millis);
           _rules.restartFreezeTimer(uptime_millis);
         }
@@ -2052,6 +2059,7 @@ void MyMesh::loop() {
   sendNeighbourNotice();
 #endif
   servicePolicyPeers();
+  sendPeerOnboarding();
   sendSubnetMode();
   sendSubnetStatus();
   sendCheckpointPacket();
