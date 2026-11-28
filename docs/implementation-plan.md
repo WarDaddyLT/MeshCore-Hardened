@@ -22,6 +22,7 @@ Build and flash development firmware as each feature lands. Formal native and fo
 | Subnet mode propagation | IN PROGRESS (RF validation pending) | Signed mode changes fit one control payload and stay within the configured subnet. A member retains its committed revision across reboot and partitions. Local restrictions can keep its effective mode stricter. |
 | Applied-policy confirmation | IN PROGRESS (RF validation pending) | On-demand authenticated subnet status distinguishes a recent matching reply from stale and unknown peers. Re-established sessions queue current policy and eligible deletion checkpoints. |
 | Manual onboarding | IN PROGRESS (RF validation pending) | An authorized administrator can review and commit local starting policy while transit remains held. Activation requires a durable commit of the reviewed revision. |
+| Peer onboarding | IN PROGRESS (RF validation pending) | An authenticated peer can supply a signed, scoped snapshot in bounded blocks. Verified staging preserves the forwarding hold. |
 | Optional room identity | VERIFIED (build) | Separate persistent room identity, signed contact export, and a read-only room adapter. It defaults off pending stock Android validation. |
 | RAK3401 development flash | VERIFIED | USB DFU completed. The repeater returned in application mode and responded to `rules status` with revision 0, open mode, and capacity for 24 records. |
 | Formal validation and release | TODO | Validate native behavior, the four-device RF matrix, and stock Android interoperability in the formal validation phase. |

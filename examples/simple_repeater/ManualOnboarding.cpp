@@ -9,6 +9,7 @@ void MyMesh::handleOnboardingCommand(const char* command, char* reply, bool usb,
     return;
   }
   if (!canWrite) { strcpy(reply, "Err - admin permission required"); return; }
+  if (handlePeerOnboardingCommand(command, reply)) return;
   if (savemesh::matchesValue(command, "start")) {
     const bool pending = _rules.onboarding();
     if (!usb || !_rules.startOnboarding()) {
@@ -17,6 +18,7 @@ void MyMesh::handleOnboardingCommand(const char* command, char* reply, bool usb,
     }
     if (!pending) clearOutboundQueue();
     _onboarding_review_revision = 0;
+    clearPeerOnboarding();
     strcpy(reply, "OK - onboarding pending; transit held");
     return;
   }
@@ -24,6 +26,7 @@ void MyMesh::handleOnboardingCommand(const char* command, char* reply, bool usb,
     strcpy(reply, "Err - no readable onboarding policy pending");
     return;
   }
+  if (peerOnboardingBusy()) { strcpy(reply, "Err - peer onboarding transfer pending"); return; }
   const uint8_t options = uint8_t(_filter_prefs.filter_1byte)
                         | uint8_t(_filter_prefs.filter_data << 1)
                         | uint8_t(_filter_prefs.filter_public << 2)

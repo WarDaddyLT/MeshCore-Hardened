@@ -158,6 +158,15 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   size_t _subnet_mode_cursor = PolicyPeerCapacity;
   uint32_t _onboarding_review_revision = 0;
   uint8_t _onboarding_review_options = 0;
+#ifndef HARDENED_MANUAL_ONBOARDING_ONLY
+  enum class PeerOnboardingState : uint8_t { Idle, Request, Proof, Receiving, SendProof, Sending, Staged, Failed };
+  PeerOnboardingState _peer_onboarding = PeerOnboardingState::Idle;
+  RuleStore::PeerPolicy _onboarding_policy;
+  RuleStore::PeerPolicyProof _onboarding_proof{};
+  uint8_t _onboarding_peer[PUB_KEY_SIZE]{};
+  size_t _onboarding_offset = 0;
+  unsigned long _onboarding_expiry = 0;
+#endif
   struct SubnetStatusReply {
     uint8_t request[4];
     uint8_t revision[8];
@@ -248,6 +257,19 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool handleSyncCommand(const char* command, char* reply, bool usb, bool can_write);
   bool handleAuthorityCommand(const char* command, char* reply, bool usb, bool can_write);
   void handleOnboardingCommand(const char* command, char* reply, bool usb, bool canWrite);
+  bool handlePeerOnboardingCommand(const char* command, char* reply);
+  static bool isPeerOnboardingPacket(const mesh::Packet& packet);
+#ifdef HARDENED_MANUAL_ONBOARDING_ONLY
+  bool peerOnboardingBusy() const { return false; }
+  void clearPeerOnboarding() {}
+  void receivePeerOnboarding(mesh::Packet&) {}
+  void sendPeerOnboarding() {}
+#else
+  bool peerOnboardingBusy() const;
+  void clearPeerOnboarding() { _peer_onboarding = PeerOnboardingState::Idle; }
+  void receivePeerOnboarding(mesh::Packet& packet);
+  void sendPeerOnboarding();
+#endif
   bool handlePeerCommand(const char* command, char* reply, bool canWrite);
   static bool isPeerHandshake(const mesh::Packet& packet);
   void receivePeerHandshake(const mesh::Packet& packet);

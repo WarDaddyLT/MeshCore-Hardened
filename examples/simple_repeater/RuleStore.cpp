@@ -9,7 +9,7 @@ constexpr const char* Pending = "/hardened_rules_tmp";
 constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
 constexpr const char* Provisioned = "/hardened_rules_provisioned";
 constexpr const char* ForwardingHold = "/hardened_rules_hold";
-constexpr uint8_t Magic[] = {'M', 'C', 'H', 13};
+constexpr uint8_t Magic[] = {'M', 'C', 'H', 14};
 constexpr uint16_t MaxFreezeMinutes = 7 * 24 * 60;
 constexpr uint16_t DefaultFreezeMinutes = 60;
 constexpr uint32_t FreezeCheckpointSeconds = 15 * 60;
@@ -18,6 +18,9 @@ constexpr size_t SignedSize = sizeof(SigningDomain) + RuleStore::ScopeNameSize *
                             + offsetof(RuleStore::Rule, signature) + PUB_KEY_SIZE;
 constexpr char CheckpointDomain[] = "MeshCore Hardened checkpoint v1";
 constexpr char SubnetModeDomain[] = "MeshCore Hardened subnet mode v1";
+constexpr char PeerPolicyDomain[] = "MeshCore Hardened onboarding snapshot v1";
+constexpr size_t PeerPolicySignedSize = sizeof(PeerPolicyDomain) + 3 * RuleStore::ScopeNameSize + PUB_KEY_SIZE
+                                          + offsetof(RuleStore::PeerPolicyProof, signature);
 constexpr size_t SubnetModeProofSize = sizeof(SubnetModeDomain) + RuleStore::ScopeNameSize
                                      + offsetof(RuleStore::SubnetModeRecord, signature);
 constexpr uint64_t MaxSubnetRevisionAdvance = uint64_t(1) << 32;
@@ -281,7 +284,8 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
   constexpr size_t prefixes[] = {offsetof(Snapshot, traffic), offsetof(Snapshot, airtime_share),
                                  offsetof(Snapshot, probation), offsetof(Snapshot, freeze_seconds),
                                  offsetof(Snapshot, floors), offsetof(Snapshot, subnet),
-                                 offsetof(Snapshot, onboarding), offsetof(Snapshot, subnet_mode)};
+                                 offsetof(Snapshot, onboarding), offsetof(Snapshot, subnet_mode),
+                                 offsetof(Snapshot, import_provider)};
   uint8_t version = 5;
   for (const size_t prefix : prefixes) {
     if (size == prefix + sizeof(legacyDigest)) break;
@@ -319,7 +323,9 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
     }
   }
   if (version < 12) snapshot.onboarding = snapshot.subnet[0] != 0;
-  snapshot.subnet_mode = {};
+  if (version < 13) snapshot.subnet_mode = {};
+  memset(snapshot.import_provider, 0, sizeof(snapshot.import_provider));
+  memset(snapshot.import_revision, 0, sizeof(snapshot.import_revision));
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, offsetof(Snapshot, digest));
   return true;
 }
@@ -339,6 +345,8 @@ bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
   mesh::Utils::sha256(digest, sizeof(digest), reinterpret_cast<const uint8_t*>(&snapshot),
                      offsetof(Snapshot, digest));
   if (memcmp(digest, snapshot.digest, sizeof(digest)) != 0) return false;
+  if (bool(decodeRevision(snapshot.import_revision)) == mesh::Utils::isZeroes(snapshot.import_provider, PUB_KEY_SIZE)
+      || (decodeRevision(snapshot.import_revision) && !snapshot.subnet[0])) return false;
 
   if (subnetRevision(snapshot.subnet_mode)) {
     if (!verifiedSubnetMode(snapshot.subnet, snapshot.subnet_mode)) return false;
@@ -766,6 +774,169 @@ uint32_t RuleStore::checkpointFloor(const Snapshot& snapshot, const uint8_t* ori
 
 bool RuleStore::hasCheckpointFloor(Scope scope, const mesh::Identity& node) const {
   return _ready && (scope == Global || scope == Region) && checkpointFloor(_state, node.pub_key, scope);
+}
+
+void RuleStore::peerPolicyBytes(const Snapshot& snapshot, const PeerPolicyProof& proof,
+                               const uint8_t* recipient, uint8_t* bytes) {
+  memcpy(bytes, PeerPolicyDomain, sizeof(PeerPolicyDomain));
+  bytes += sizeof(PeerPolicyDomain);
+  const char* const names[] = {snapshot.subnet, snapshot.domain, snapshot.region};
+  for (const auto* name : names) {
+    memcpy(bytes, name, ScopeNameSize);
+    bytes += ScopeNameSize;
+  }
+  memcpy(bytes, recipient, PUB_KEY_SIZE);
+  memcpy(bytes + PUB_KEY_SIZE, &proof, offsetof(PeerPolicyProof, signature));
+}
+
+bool RuleStore::exportPeerPolicy(PeerPolicy& policy, PeerPolicyProof& proof,
+                                 const mesh::LocalIdentity& node, const uint8_t* recipient) const {
+  if (!transitAllowed() || !trustedPeer(recipient) || !publisherAllowed(Subnet, node.pub_key, node)
+      || mesh::Utils::isZeroes(proof.request, sizeof(proof.request))) return false;
+  proof.count = 0;
+  memcpy(proof.revision, _state.revision, sizeof(proof.revision));
+  memcpy(policy.subnet, _state.subnet, ScopeNameSize);
+  memcpy(policy.domain, _state.domain, ScopeNameSize);
+  memcpy(policy.region, _state.region, ScopeNameSize);
+  policy.mode = _state.subnet_mode;
+  memcpy(policy.floors, _state.floors, sizeof(policy.floors));
+  for (size_t i = 0; i < _state.count; ++i) {
+    const auto* rule = exportRule(i);
+    if (rule) policy.rules[proof.count++] = *rule;
+  }
+  mesh::Utils::sha256(proof.digest, sizeof(proof.digest), reinterpret_cast<const uint8_t*>(&policy),
+                      PeerPolicy::wireSize(proof.count));
+  uint8_t signedBytes[PeerPolicySignedSize];
+  peerPolicyBytes(_state, proof, recipient, signedBytes);
+  node.sign(proof.signature, signedBytes, sizeof(signedBytes));
+  return true;
+}
+
+bool RuleStore::verifyPeerPolicyProof(const PeerPolicyProof& proof, const uint8_t* provider,
+                                      const mesh::Identity& node) const {
+  const auto sourceRevision = decodeRevision(proof.revision);
+  if (!forwardingAllowed() || !onboarding() || !trustedPeer(provider)
+      || !publisherAllowed(Subnet, provider, node) || proof.count > Capacity || !sourceRevision
+      || (memcmp(_state.import_provider, provider, PUB_KEY_SIZE) == 0
+          && sourceRevision < decodeRevision(_state.import_revision))
+      || mesh::Utils::isZeroes(proof.request, sizeof(proof.request))) return false;
+  uint8_t signedBytes[PeerPolicySignedSize];
+  peerPolicyBytes(_state, proof, node.pub_key, signedBytes);
+  return mesh::Identity(provider).verify(proof.signature, signedBytes, sizeof(signedBytes));
+}
+
+bool RuleStore::peerPolicyMatches(const PeerPolicy& policy, uint8_t count) const {
+  if (memcmp(policy.subnet, _state.subnet, ScopeNameSize) || memcmp(policy.domain, _state.domain, ScopeNameSize)
+      || memcmp(policy.region, _state.region, ScopeNameSize) || memcmp(&policy.mode, &_state.subnet_mode, sizeof(policy.mode))
+      || memcmp(policy.floors, _state.floors, sizeof(policy.floors))) return false;
+  size_t index = 0;
+  for (size_t i = 0; i < _state.count; ++i) {
+    const auto* rule = exportRule(i);
+    if (!rule) continue;
+    if (index >= count || memcmp(rule, &policy.rules[index++], sizeof(*rule))) return false;
+  }
+  return index == count;
+}
+
+bool RuleStore::stagePeerPolicy(const PeerPolicy& policy, const PeerPolicyProof& proof,
+                               const uint8_t* provider, const mesh::Identity& node) {
+  const uint32_t revision = this->revision();
+  if (revision == UINT32_MAX || !verifyPeerPolicyProof(proof, provider, node)) return false;
+  if (memcmp(policy.subnet, _state.subnet, ScopeNameSize) || memcmp(policy.domain, _state.domain, ScopeNameSize)
+      || memcmp(policy.region, _state.region, ScopeNameSize)) return false;
+  uint8_t digest[sizeof(proof.digest)];
+  mesh::Utils::sha256(digest, sizeof(digest), reinterpret_cast<const uint8_t*>(&policy),
+                      PeerPolicy::wireSize(proof.count));
+  if (memcmp(digest, proof.digest, sizeof(digest))) return false;
+
+  _candidate = _state;
+  const uint64_t incomingMode = subnetRevision(policy.mode);
+  if (incomingMode) {
+    const uint64_t current = subnetModeRevision();
+    if (!publisherAllowed(Subnet, policy.mode.origin, node) || !verifiedSubnetMode(_state.subnet, policy.mode)
+        || (incomingMode > current && incomingMode - current > MaxSubnetRevisionAdvance)) return false;
+    if (!node.matches(policy.mode.origin) && (incomingMode > current || (incomingMode == current
+        && memcmp(policy.mode.origin, _state.subnet_mode.origin, PUB_KEY_SIZE) > 0))) {
+      _candidate.subnet_mode = policy.mode;
+    }
+  } else if (!mesh::Utils::isZeroes(reinterpret_cast<const uint8_t*>(&policy.mode), sizeof(policy.mode))) {
+    return false;
+  }
+
+  for (const auto& floor : policy.floors) {
+    const bool hasFloor = decodeRevision(floor.global) || decodeRevision(floor.region);
+    if (hasFloor == mesh::Utils::isZeroes(floor.key, PUB_KEY_SIZE)) return false;
+    if (!hasFloor || node.matches(floor.key)) continue;
+    OriginFloor* target = nullptr;
+    for (auto& entry : _candidate.floors) {
+      if (memcmp(entry.key, floor.key, PUB_KEY_SIZE) == 0) { target = &entry; break; }
+      if (!target && mesh::Utils::isZeroes(entry.key, PUB_KEY_SIZE)) target = &entry;
+    }
+    if (!target) return false;
+    memcpy(target->key, floor.key, PUB_KEY_SIZE);
+    constexpr Scope scopes[] = {Global, Region};
+    for (const auto scope : scopes) {
+      const uint32_t incoming = decodeRevision(floor.forScope(scope));
+      if (incoming && !publisherAllowed(scope, provider, node)) return false;
+      if (incoming > decodeRevision(target->forScope(scope))) encodeRevision(target->forScope(scope), incoming);
+    }
+  }
+
+  size_t retained = 0;
+  for (size_t i = 0; i < _state.count; ++i) {
+    const auto& old = _state.rules[i];
+    const auto scope = static_cast<Scope>(old.scope);
+    const uint32_t floor = checkpointFloor(_candidate, old.origin, scope);
+    bool keep = scope == Local || floor <= checkpointFloor(_state, old.origin, scope)
+             || decodeRevision(old.revision) > floor;
+    if (!keep) {
+      for (size_t j = 0; j < proof.count; ++j) {
+        if (memcmp(&old, &policy.rules[j], sizeof(old)) == 0) { keep = true; break; }
+      }
+    }
+    if (keep) _candidate.rules[retained++] = old;
+  }
+  _candidate.count = retained;
+
+  for (size_t i = 0; i < proof.count; ++i) {
+    const auto& rule = policy.rules[i];
+    const auto scope = static_cast<Scope>(rule.scope);
+    if ((scope != Global && scope != Region) || !validRule(rule) || !publisherAllowed(scope, rule.origin, node)) {
+      return false;
+    }
+    uint8_t signedBytes[SignedSize];
+    signableBytes(_state, rule, signedBytes);
+    if (!mesh::Identity(rule.origin).verify(rule.signature, signedBytes, sizeof(signedBytes))) return false;
+    for (size_t j = 0; j < i; ++j) {
+      if (memcmp(policy.rules[j].id, rule.id, IdSize) == 0) return false;
+    }
+    if (node.matches(rule.origin)) continue;
+    const uint32_t incoming = decodeRevision(rule.revision);
+    if (incoming <= checkpointFloor(_state, rule.origin, scope)) continue;
+    bool skip = false;
+    for (size_t j = 0; j < _state.count; ++j) {
+      const auto& old = _state.rules[j];
+      if (memcmp(old.id, rule.id, IdSize) != 0) continue;
+      if (old.scope != rule.scope || memcmp(old.origin, rule.origin, PUB_KEY_SIZE) != 0) return false;
+      if (old.kind != rule.kind || old.subject != rule.subject || old.value != rule.value
+          || memcmp(old.subject_key, rule.subject_key, PUB_KEY_SIZE) != 0) return false;
+      if (!old.deleted && !rule.deleted && decodeRevision(old.revision) != incoming) return false;
+      skip = old.deleted || decodeRevision(old.revision) >= incoming;
+      break;
+    }
+    if (skip) continue;
+    size_t slot = 0;
+    for (; slot < _candidate.count; ++slot) {
+      if (memcmp(_candidate.rules[slot].id, rule.id, IdSize) == 0) break;
+    }
+    if (slot == _candidate.count) slot = reserveRuleSlot(_candidate);
+    if (slot == Capacity) return false;
+    _candidate.rules[slot] = rule;
+  }
+  memcpy(_candidate.import_provider, provider, PUB_KEY_SIZE);
+  memcpy(_candidate.import_revision, proof.revision, sizeof(proof.revision));
+  encodeRevision(_candidate.revision, revision + 1);
+  return commit();
 }
 
 bool RuleStore::makeCheckpoint(Scope scope, const mesh::LocalIdentity& node, Checkpoint& checkpoint,
