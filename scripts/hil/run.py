@@ -619,7 +619,7 @@ def test_sync(devices, report):
             raise Failure("Restore signed Normal policy on R1 and confirm its application on R2.") from None
 
 
-def test_manual_onboarding(devices, report):
+def onboarding_fixture(devices):
     origin, joining = devices["R1"], devices["R2"]
     ready = pairs(origin.cli("rules onboarding"))
     pending = pairs(joining.cli("rules onboarding"))
@@ -629,8 +629,14 @@ def test_manual_onboarding(devices, report):
     if ready.get("onboarding") != "active" or ready.get("transit") != "available":
         raise Skip("R1 must already have active transit as the forwarding control.")
     if pending != {"subnet": subnet, "onboarding": "pending", "source": "manual", "transit": "held"}:
-        raise Skip("Set up R2 for manual onboarding over USB before running this suite.")
+        raise Skip("Use USB to set up R2 with pending onboarding and no staged snapshot.")
+    return pending
 
+
+def activate_onboarding(devices, report, pending):
+    joining = devices["R2"]
+    subnet = pending["subnet"]
+    source = pending["source"]
     sample(devices, "ADMIN", "ACTOR", True, report, held_repeater="R2")
     before = pairs(joining.cli("rules status"))
     review = pairs(joining.cli("rules onboarding review"))
@@ -646,7 +652,7 @@ def test_manual_onboarding(devices, report):
     report["cleanup"]["R2 onboarding"] = "commit unconfirmed; inspect rules onboarding"
     reply = joining.cli(f"rules onboarding commit {token}")
     after = pairs(joining.cli("rules onboarding"))
-    active = {"subnet": subnet, "onboarding": "active", "source": "manual", "transit": "available"}
+    active = {"subnet": subnet, "onboarding": "active", "source": source, "transit": "available"}
     if after != active:
         raise Failure("R2 did not activate the reviewed policy and release its forwarding hold.")
     report["cleanup"]["R2 onboarding"] = "activated as intended"
@@ -656,10 +662,73 @@ def test_manual_onboarding(devices, report):
     expected_revision = str(int(before["rev"]) + 1)
     if committed.get("rev") != expected_revision or pairs(joining.cli("rules status")).get("rev") != expected_revision:
         raise Failure("R2 did not advance the acknowledged policy revision exactly once.")
-    report["samples"].append({"type": "manual onboarding commit", "repeater": "R2",
+    report["samples"].append({"type": f"{source} onboarding commit", "repeater": "R2",
                               "revision_before": before["rev"], "revision_after": committed["rev"],
                               "mode": review["mode"], "filters": review["filters"]})
     sample(devices, "ADMIN", "ACTOR", True, report)
+
+
+def test_manual_onboarding(devices, report):
+    activate_onboarding(devices, report, onboarding_fixture(devices))
+
+
+def test_peer_onboarding(devices, report):
+    pending = onboarding_fixture(devices)
+    provider, joining = devices["R1"], devices["R2"]
+    if pairs(joining.cli("rules onboarding peer")).get("peer") != "idle":
+        raise Skip("R2 needs an idle peer onboarding slot.")
+    for end, peer in ((provider, joining), (joining, provider)):
+        if pairs(end.cli(f"rules peer status subnet {peer.key}")).get("peer") != "authenticated":
+            raise Skip("Provision a fresh authenticated subnet session between R1 and R2.")
+    for device in (provider, joining):
+        if pairs(device.cli(f"rules authority {provider.key}")).get("subnet") != "allowed":
+            raise Skip(f"{device.name} needs R1's subnet publisher grant.")
+    policy = pairs(provider.cli("rules subnet mode"))
+    revision = policy.get("rev", "")
+    if (policy.get("mode") != "normal" or not re.fullmatch(r"[0-9a-f]{16}", revision)
+            or int(revision, 16) == 0):
+        raise Skip("R1 needs a signed Normal mode in the test subnet.")
+
+    report["cleanup"]["R2 snapshot"] = "request unconfirmed; inspect rules onboarding peer"
+    try:
+        if joining.cli(f"rules onboarding peer fetch {provider.key}") != "OK - policy snapshot request queued":
+            raise Failure("R2 did not accept a snapshot request from the approved R1 provider.")
+        staged = wait_for_peer_snapshot(joining)
+    except (Failure, OSError, serial.SerialException):
+        try:
+            if (pairs(joining.cli("rules onboarding peer")).get("peer") == "pending"
+                    and joining.cli("rules onboarding peer cancel") != "OK - peer transfer cleared"):
+                raise Failure("R2 did not acknowledge snapshot cancellation.")
+            report["cleanup"]["R2 snapshot"] = "no pending transfer; inspect held policy before retry"
+        except (Failure, OSError, serial.SerialException):
+            report["cleanup"]["R2 snapshot"] = "check and cancel any pending transfer over USB"
+        raise
+
+    pending = dict(pending, source="peer")
+    report["cleanup"]["R2 snapshot"] = "staged as intended"
+    if pairs(joining.cli("rules onboarding")) != pending or staged.get("transit") != "held":
+        raise Failure("R2 did not report a staged peer policy with transit held.")
+    mode = pairs(joining.cli("rules subnet mode"))
+    if mode.get("rev") != revision or mode.get("effective") != "normal":
+        raise Failure("The staged R2 policy did not match the provider's signed Normal revision.")
+    if int(staged["received"]) <= 0:
+        raise Failure("R2 reported an empty snapshot transfer.")
+    report["samples"].append({"type": "peer snapshot staged", "repeater": "R2", "provider": "R1",
+                              "subnet_revision": revision, "received": int(staged["received"])})
+    activate_onboarding(devices, report, pending)
+
+
+def wait_for_peer_snapshot(joining):
+    deadline = time.monotonic() + 51 * 60
+    while time.monotonic() < deadline:
+        status = pairs(joining.cli("rules onboarding peer"))
+        state = status.get("peer")
+        if state == "staged":
+            return status
+        if state != "pending" or status.get("transit") != "held":
+            raise Failure("R2 did not keep the snapshot transfer pending with transit held.")
+        time.sleep(10)
+    raise Failure("R2 did not stage the snapshot within the transfer window.")
 
 
 def test_shared_rule_recovery(devices, report):
@@ -833,10 +902,11 @@ SCENARIOS = {
 
 PREPARED_SCENARIOS = {
     "onboarding-manual": (test_manual_onboarding, "Manual policy review, commit, and forwarding verified."),
+    "onboarding-peer": (test_peer_onboarding, "Peer snapshot staging, policy activation, and forwarding verified."),
 }
 
 REMAINING = ("remaining ACL cases", "complete filter regression", "physical partition",
-             "manual onboarding (separate setup)", "peer onboarding",
+             "manual and peer onboarding (separate setup)",
              "stock Android and room identity", "signed neighbour notices", "baseline comparison")
 
 
