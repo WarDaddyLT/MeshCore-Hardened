@@ -33,6 +33,14 @@ public:
     uint8_t origin[PUB_KEY_SIZE];
   };
   static constexpr size_t WireSize = offsetof(Rule, origin);
+  struct Checkpoint {
+    uint8_t origin[PUB_KEY_SIZE];
+    uint8_t floor[4];
+    uint8_t scope;
+    uint8_t count;
+    uint8_t digest[32];
+    uint8_t signature[SIGNATURE_SIZE];
+  };
   enum MergeResult : uint8_t { Rejected, Current, Changed };
 
   void begin(FILESYSTEM* fs, const mesh::LocalIdentity& node);
@@ -67,12 +75,27 @@ public:
   bool trustedPeer(const uint8_t* key) const;
   const Rule* exportRule(size_t index) const;
   MergeResult mergeRule(Rule& rule, const uint8_t* fingerprint, const mesh::Identity& node);
+  bool makeCheckpoint(Scope scope, const mesh::LocalIdentity& node, Checkpoint& checkpoint,
+                      Rule (&records)[Capacity]) const;
+  MergeResult checkCheckpoint(const Checkpoint& checkpoint, const mesh::Identity& node,
+                              bool local = false) const;
+  MergeResult installCheckpoint(const Checkpoint& checkpoint, const Rule* records, size_t count,
+                                const mesh::Identity& node, bool local = false);
   static constexpr size_t FingerprintSize = 6;
   void handleCommand(const char* command, char* reply, const mesh::LocalIdentity& node,
                      const mesh::Identity* issuer, uint32_t timestamp, mesh::RNG& rng, bool can_write,
                      bool can_publish, bool& sync_requested, uint64_t uptimeMs = 0);
 
 private:
+  struct OriginFloor {
+    uint8_t key[PUB_KEY_SIZE];
+    uint8_t global[4];
+    uint8_t region[4];
+
+    const uint8_t* forScope(Scope scope) const { return scope == Global ? global : region; }
+    uint8_t* forScope(Scope scope) { return scope == Global ? global : region; }
+  };
+
   struct Snapshot {
     uint8_t magic[4];
     uint8_t revision[4];
@@ -96,6 +119,7 @@ private:
     uint8_t airtime_share = forward_traffic::DefaultAirtimeShare;
     probation::Snapshot probation;
     probation::Seconds freeze_seconds;
+    OriginFloor floors[9];
     uint8_t digest[32];
   };
 
@@ -116,6 +140,7 @@ private:
   static bool validRule(const Rule& rule);
   static size_t reserveRuleSlot(Snapshot& snapshot);
   static void signableBytes(const Snapshot& snapshot, const Rule& rule, uint8_t* bytes);
+  static uint32_t checkpointFloor(const Snapshot& snapshot, const uint8_t* origin, Scope scope);
   const char* parseScope(const char* input, uint8_t& scope) const;
   int find(const char* id) const;
   void describe(size_t index, char* reply) const;

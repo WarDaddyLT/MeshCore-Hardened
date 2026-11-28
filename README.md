@@ -309,6 +309,8 @@ The policy record is signed with Ed25519 and bound to its origin, domain, and sc
 
 `rules sync.key off` disables sync without deleting accepted rules. `rules untrust <peer-key>` blocks later updates from that signer. Previously accepted state remains until the applicable policy changes. An offline repeater can continue using its last accepted policy during a partition.
 
+Use `rules checkpoint global` or `rules checkpoint region` on the originating repeater to free shared deletion slots. A peer commits the checkpoint only after verifying the complete active rule set. The committed revision prevents stale copies from restoring deleted rules. Use a fresh checkpoint from the origin after an interrupted transfer and verify the rule list on the peer. [Shared policy commands](docs/hardened-repeater-cli.md#shared-policy)
+
 ## Optional administration room
 
 The room defaults off. Enable it only when you are ready to check the experimental room workflow. Android contact import, login, and reply display are still pending validation. The primary identity continues handling normal repeater forwarding and management.

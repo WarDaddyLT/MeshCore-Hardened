@@ -660,6 +660,7 @@ bool MyMesh::shouldExportToBridge(mesh::Packet* packet) {
   }
   if (packet->getPayloadType() == PAYLOAD_TYPE_CONTROL && packet->payload_len == PolicyPayloadSize
       && packet->payload[0] == PolicyType) return false;
+  if (isCheckpointPacket(*packet)) return false;
   if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
       && (!verifyReceivedAdvert(*packet) || !allowVerifiedAdvert(*packet, false))) return false;
   return !shouldDropByRate(packet, _bridge_forward_budget);
@@ -704,6 +705,10 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
     }
   } else {
     recv_pkt_region = NULL;
+  }
+  if (isCheckpointPacket(*pkt)) {
+    receiveCheckpointPacket(*pkt);
+    return ACTION_RELEASE;
   }
   if (pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL && pkt->payload_len == PolicyPayloadSize
       && pkt->payload[0] == PolicyType) {
@@ -796,12 +801,19 @@ bool MyMesh::handleSyncCommand(const char* command, char* reply, bool usb, bool 
     return true;
   }
   const char* arg;
+  if (matchCommand(command, "checkpoint", &arg)) {
+    handleCheckpointCommand(arg, reply, can_write);
+    return true;
+  }
   if (matchCommand(command, "sync.key", &arg)) {
     uint8_t key[CIPHER_KEY_SIZE]{};
     bool ok = usb && (matchesValue(arg, "off")
         || (savemesh::isHex(arg, 2 * sizeof(key)) && mesh::Utils::fromHex(key, sizeof(key), arg)
             && !mesh::Utils::isZeroes(key, sizeof(key)))) && _rules.setSyncKey(key);
-    if (ok && mesh::Utils::isZeroes(key, sizeof(key))) _sync_cursor = RuleStore::Capacity;
+    if (ok) {
+      _checkpoint_transfer = CheckpointTransfer::Idle;
+      if (mesh::Utils::isZeroes(key, sizeof(key))) _sync_cursor = RuleStore::Capacity;
+    }
     strcpy(reply, ok ? "OK" : "Err - use USB with a private 16-byte sync key");
     return true;
   }
@@ -1735,6 +1747,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       else {
         _rules.handleRecoveryCommand(args, reply);
         if (strncmp(reply, "OK", 2) == 0 && matchCommand(args, "recover", &recovery_arg)) {
+          _checkpoint_transfer = CheckpointTransfer::Idle;
           _probation.begin(_rules.probationState(), uptime_millis);
           _rules.restartFreezeTimer(uptime_millis);
         }
@@ -1922,6 +1935,7 @@ void MyMesh::loop() {
 
   mesh::Mesh::loop();
   sendNeighbourNotice();
+  sendCheckpointPacket();
   sendPolicyUpdate();
 
   if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
