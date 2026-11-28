@@ -254,6 +254,7 @@ On A:
 rules domain lab
 rules sync.key <shared-sync-key>
 rules trust <repeater-B-public-key>
+rules publisher grant global <repeater-B-public-key>
 rules sync status
 ```
 
@@ -263,10 +264,11 @@ On B:
 rules domain lab
 rules sync.key <shared-sync-key>
 rules trust <repeater-A-public-key>
+rules publisher grant global <repeater-A-public-key>
 rules sync status
 ```
 
-Domain and region names accept 1–15 lowercase letters, digits, underscores, or hyphens. There are eight peer key slots. Use the full key for `rules trust` and `rules untrust`. The shared symmetric key gives authorized members access to encrypted policy frames. Each receiving repeater also verifies the Ed25519 signature against the provisioned origin key. Changing the domain or region is blocked while that name is used by stored rules or deletion records.
+Domain and region names accept 1–15 lowercase letters, digits, underscores, or hyphens. The shared symmetric key gives authorized members access to encrypted policy frames. Each receiver verifies the Ed25519 signature and its configured publisher grant for that scope. Use the full public key for peer and publisher provisioning. Grant `region` separately on each receiver that should accept regional records. Changing the domain or region is blocked while the name is in use by rules, checkpoint floors or publisher grants.
 
 | Scope | Where the rule can travel |
 | --- | --- |
@@ -307,7 +309,7 @@ sequenceDiagram
 
 The policy record is signed with Ed25519 and bound to its origin, domain, and scope. The radio packet carries one record in a Hardened control frame, encrypted with AES-128-GCM using a 12-byte nonce and 12-byte authentication tag. A short origin prefix selects candidate keys. Only full signature verification authorizes the record. Peers reject stale updates to a known rule and retain signed deletion records to prevent resurrection. A repeater that already has an update does not re-flood it on receipt. For a multi-hop repair, run `rules sync` on intermediate trusted repeaters holding current state. Stock repeater interoperability for ordinary traffic is separate from participation in this sync protocol.
 
-`rules sync.key off` disables sync without deleting accepted rules. `rules untrust <peer-key>` blocks later updates from that signer. Previously accepted state remains until the applicable policy changes. An offline repeater can continue using its last accepted policy during a partition.
+`rules sync.key off` disables sync and keeps accepted rules. Use `rules publisher retire <scope> <key>` over USB on each affected repeater to durably remove a publisher's rules for that scope and refuse later signed copies. `rules untrust` removes peer trust. An offline repeater can continue using its last accepted policy during a partition.
 
 Use `rules checkpoint global` or `rules checkpoint region` on the originating repeater to free shared deletion slots. A peer commits the checkpoint only after verifying the complete active rule set. The committed revision prevents stale copies from restoring deleted rules. Use a fresh checkpoint from the origin after an interrupted transfer and verify the rule list on the peer. [Shared policy commands](docs/hardened-repeater-cli.md#shared-policy)
 

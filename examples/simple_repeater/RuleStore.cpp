@@ -9,7 +9,7 @@ constexpr const char* Pending = "/hardened_rules_tmp";
 constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
 constexpr const char* Provisioned = "/hardened_rules_provisioned";
 constexpr const char* ForwardingHold = "/hardened_rules_hold";
-constexpr uint8_t Magic[] = {'M', 'C', 'H', 10};
+constexpr uint8_t Magic[] = {'M', 'C', 'H', 11};
 constexpr uint16_t MaxFreezeMinutes = 7 * 24 * 60;
 constexpr uint16_t DefaultFreezeMinutes = 60;
 constexpr uint32_t FreezeCheckpointSeconds = 15 * 60;
@@ -245,7 +245,7 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
   uint8_t legacyDigest[sizeof(snapshot.digest)];
   constexpr size_t prefixes[] = {offsetof(Snapshot, traffic), offsetof(Snapshot, airtime_share),
                                  offsetof(Snapshot, probation), offsetof(Snapshot, freeze_seconds),
-                                 offsetof(Snapshot, floors)};
+                                 offsetof(Snapshot, floors), offsetof(Snapshot, subnet)};
   uint8_t version = 5;
   for (const size_t prefix : prefixes) {
     if (size == prefix + sizeof(legacyDigest)) break;
@@ -266,7 +266,20 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
   if (version < 7) snapshot.airtime_share = forward_traffic::DefaultAirtimeShare;
   if (version < 8) snapshot.probation = {};
   if (version < 9) snapshot.freeze_seconds = {};
-  memset(snapshot.floors, 0, sizeof(snapshot.floors));
+  if (version < 10) memset(snapshot.floors, 0, sizeof(snapshot.floors));
+  memset(snapshot.subnet, 0, sizeof(snapshot.subnet));
+  memset(snapshot.authorities, 0, sizeof(snapshot.authorities));
+  const uint8_t empty[PUB_KEY_SIZE]{};
+  const uint8_t legacyGrants = (snapshot.domain[0] ? scopePermission(Global) : 0)
+                             | (snapshot.domain[0] && snapshot.region[0] ? scopePermission(Region) : 0);
+  if (legacyGrants) {
+    for (const auto& peer : snapshot.trusted_peers) {
+      if (memcmp(peer, empty, sizeof(empty)) == 0) continue;
+      auto* authority = authorityFor(snapshot, peer);
+      memcpy(authority->key, peer, PUB_KEY_SIZE);
+      authority->permissions = legacyGrants;
+    }
+  }
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, offsetof(Snapshot, digest));
   return true;
 }
@@ -278,7 +291,8 @@ bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
       || snapshot.freeze_seconds.get() > uint32_t(MaxFreezeMinutes) * 60
       || snapshot.airtime_share > 100
       || snapshot.room_name[sizeof(snapshot.room_name) - 1]
-      || snapshot.domain[ScopeNameSize - 1] || snapshot.region[ScopeNameSize - 1]) return false;
+      || snapshot.domain[ScopeNameSize - 1] || snapshot.region[ScopeNameSize - 1]
+      || snapshot.subnet[ScopeNameSize - 1]) return false;
 
   uint8_t digest[sizeof(snapshot.digest)];
   mesh::Utils::sha256(digest, sizeof(digest), reinterpret_cast<const uint8_t*>(&snapshot),
@@ -286,6 +300,20 @@ bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
   if (memcmp(digest, snapshot.digest, sizeof(digest)) != 0) return false;
 
   const uint8_t empty[PUB_KEY_SIZE]{};
+  const uint8_t scopes = (snapshot.domain[0] ? scopePermission(Global) : 0)
+                       | (snapshot.domain[0] && snapshot.region[0] ? scopePermission(Region) : 0)
+                       | (snapshot.subnet[0] ? scopePermission(Subnet) : 0);
+  for (size_t i = 0; i < sizeof(snapshot.authorities) / sizeof(snapshot.authorities[0]); ++i) {
+    const auto& entry = snapshot.authorities[i];
+    const bool emptyKey = memcmp(entry.key, empty, sizeof(empty)) == 0;
+    if (emptyKey != ((entry.permissions | entry.retired) == 0)
+        || (entry.permissions & ~(scopes | RelayPermission)) || (entry.retired & ~scopes)
+        || (entry.retired & entry.permissions)) return false;
+    if (emptyKey) continue;
+    for (size_t prior = 0; prior < i; ++prior) {
+      if (memcmp(entry.key, snapshot.authorities[prior].key, PUB_KEY_SIZE) == 0) return false;
+    }
+  }
   for (size_t i = 0; i < sizeof(snapshot.floors) / sizeof(snapshot.floors[0]); ++i) {
     const auto& entry = snapshot.floors[i];
     const bool global = decodeRevision(entry.global) != 0;
@@ -494,11 +522,15 @@ bool RuleStore::setRoomName(const char* name) {
 }
 
 const char* RuleStore::scopeName(Scope scope) const {
-  return scope == Global ? _state.domain : _state.region;
+  if (scope == Global) return _state.domain;
+  if (scope == Region) return _state.region;
+  if (scope == Subnet) return _state.subnet;
+  return "";
 }
 
 bool RuleStore::setScope(Scope scope, const char* name) {
-  if (!_ready || decodeRevision(_state.revision) == UINT32_MAX) return false;
+  if (!_ready || decodeRevision(_state.revision) == UINT32_MAX
+      || (scope != Global && scope != Region && scope != Subnet)) return false;
   size_t length = strlen(name);
   if (!length || length >= ScopeNameSize) return false;
   for (size_t i = 0; i < length; i++) {
@@ -506,19 +538,110 @@ bool RuleStore::setScope(Scope scope, const char* name) {
     if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) return false;
   }
   if (strcmp(scopeName(scope), name) == 0) return true;
-  for (const auto& entry : _state.floors) {
-    if (decodeRevision(entry.region) || (scope == Global && decodeRevision(entry.global))) return false;
+  const uint8_t affected = scopePermission(scope) | (scope == Global ? scopePermission(Region) : 0);
+  for (const auto& entry : _state.authorities) {
+    if ((entry.permissions | entry.retired) & affected) return false;
+  }
+  if (scope != Subnet) {
+    for (const auto& entry : _state.floors) {
+      if (decodeRevision(entry.region) || (scope == Global && decodeRevision(entry.global))) return false;
+    }
   }
   for (size_t i = 0; i < _state.count; i++) {
     uint8_t rule_scope = _state.rules[i].scope;
     if (rule_scope == scope || (scope == Global && rule_scope == Region)) return false;
   }
   _candidate = _state;
-  char* field = scope == Global ? _candidate.domain : _candidate.region;
+  char* field = scope == Global ? _candidate.domain : scope == Region ? _candidate.region : _candidate.subnet;
   memset(field, 0, ScopeNameSize);
   memcpy(field, name, length);
   encodeRevision(_candidate.revision, decodeRevision(_state.revision) + 1);
   return commit();
+}
+
+RuleStore::Authority* RuleStore::authorityFor(Snapshot& snapshot, const uint8_t* key) {
+  Authority* free = nullptr;
+  for (auto& entry : snapshot.authorities) {
+    if (memcmp(entry.key, key, PUB_KEY_SIZE) == 0) return &entry;
+    if (!free && !(entry.permissions | entry.retired)) free = &entry;
+  }
+  return free;
+}
+
+const RuleStore::Authority* RuleStore::authorityFor(const uint8_t* key) const {
+  for (const auto& entry : _state.authorities) {
+    if ((entry.permissions | entry.retired) && memcmp(entry.key, key, PUB_KEY_SIZE) == 0) return &entry;
+  }
+  return nullptr;
+}
+
+bool RuleStore::publisherAllowed(Scope scope, const uint8_t* key, const mesh::Identity& node) const {
+  if (!_ready || !*scopeName(scope) || (scope == Region && !_state.domain[0])) return false;
+  const uint8_t permission = scopePermission(scope);
+  const auto* entry = authorityFor(key);
+  if (entry && (entry->retired & permission)) return false;
+  if (scope != Subnet && node.matches(key)) return true;
+  return entry && (entry->permissions & permission);
+}
+
+bool RuleStore::setPublisher(Scope scope, const uint8_t* key, bool grant) {
+  const uint32_t revision = decodeRevision(_state.revision);
+  if (!_ready || revision == UINT32_MAX || !*scopeName(scope) || (scope == Region && !_state.domain[0])
+      || mesh::Utils::isZeroes(key, PUB_KEY_SIZE)) return false;
+  const uint8_t bit = scopePermission(scope);
+  _candidate = _state;
+  auto* entry = authorityFor(_candidate, key);
+  if (!entry) return false;
+  if (entry->retired & bit) return !grant;
+  if (grant && (entry->permissions & bit)) return true;
+  memcpy(entry->key, key, PUB_KEY_SIZE);
+  if (grant) {
+    entry->permissions |= bit;
+  } else {
+    entry->permissions &= ~bit;
+    entry->retired |= bit;
+    size_t kept = 0;
+    for (size_t i = 0; i < _state.count; ++i) {
+      const auto& rule = _state.rules[i];
+      if (rule.scope != scope || memcmp(rule.origin, key, PUB_KEY_SIZE) != 0) _candidate.rules[kept++] = rule;
+    }
+    _candidate.count = kept;
+  }
+  encodeRevision(_candidate.revision, revision + 1);
+  return commit();
+}
+
+bool RuleStore::relayAllowed(const uint8_t* key) const {
+  const auto* entry = authorityFor(key);
+  return _ready && entry && (entry->permissions & RelayPermission);
+}
+
+bool RuleStore::setRelay(const uint8_t* key, bool allow) {
+  const uint32_t revision = decodeRevision(_state.revision);
+  if (!_ready || revision == UINT32_MAX || mesh::Utils::isZeroes(key, PUB_KEY_SIZE)) return false;
+  if (relayAllowed(key) == allow) return true;
+  _candidate = _state;
+  auto* entry = authorityFor(_candidate, key);
+  if (!entry) return false;
+  if (allow) {
+    memcpy(entry->key, key, PUB_KEY_SIZE);
+    entry->permissions |= RelayPermission;
+  } else {
+    entry->permissions &= ~RelayPermission;
+    if (!(entry->permissions | entry->retired)) memset(entry->key, 0, PUB_KEY_SIZE);
+  }
+  encodeRevision(_candidate.revision, revision + 1);
+  return commit();
+}
+
+void RuleStore::describeAuthority(const uint8_t* key, const mesh::Identity& node, char* reply) const {
+  const auto* entry = authorityFor(key);
+  const auto state = [&](Scope scope) {
+    if (entry && (entry->retired & scopePermission(scope))) return "retired";
+    return publisherAllowed(scope, key, node) ? "allowed" : "off";
+  };
+  snprintf(reply, 150, "peer=%u relay=%u global=%s region=%s subnet=%s", trustedPeer(key), relayAllowed(key),
+           state(Global), state(Region), state(Subnet));
 }
 
 bool RuleStore::trustedPeer(const uint8_t* key) const {
@@ -561,8 +684,8 @@ uint32_t RuleStore::checkpointFloor(const Snapshot& snapshot, const uint8_t* ori
 
 bool RuleStore::makeCheckpoint(Scope scope, const mesh::LocalIdentity& node, Checkpoint& checkpoint,
                                Rule (&records)[Capacity]) const {
-  if (!forwardingAllowed() || (scope != Global && scope != Region) || !_state.domain[0]
-      || (scope == Region && !_state.region[0]) || !decodeRevision(_state.revision)) return false;
+  if (!forwardingAllowed() || (scope != Global && scope != Region)
+      || !publisherAllowed(scope, node.pub_key, node) || !decodeRevision(_state.revision)) return false;
   checkpoint = {};
   checkpoint.scope = scope;
   memcpy(checkpoint.origin, node.pub_key, PUB_KEY_SIZE);
@@ -590,11 +713,12 @@ RuleStore::MergeResult RuleStore::checkCheckpoint(const Checkpoint& checkpoint, 
       || (checkpoint.scope == Region && !_state.region[0]) || checkpoint.count > Capacity) return Rejected;
   const uint32_t floor = decodeRevision(checkpoint.floor);
   if (!floor || local != node.matches(checkpoint.origin)) return Rejected;
+  const auto scope = static_cast<Scope>(checkpoint.scope);
+  if (!publisherAllowed(scope, checkpoint.origin, node)) return Rejected;
   if (!local) {
     const auto decision = decide(Repeater, checkpoint.origin);
-    if (!trustedPeer(checkpoint.origin) || decision == Denied || (mode() == Locked && decision != Allowed)) return Rejected;
+    if (decision == Denied || (mode() == Locked && decision != Allowed)) return Rejected;
   }
-  const auto scope = static_cast<Scope>(checkpoint.scope);
   uint8_t signedBytes[CheckpointSignedSize];
   checkpointBytes(checkpoint, _state.domain, _state.region, signedBytes);
   const mesh::Identity signer(checkpoint.origin);
@@ -668,9 +792,10 @@ RuleStore::MergeResult RuleStore::mergeRule(Rule& rule, const uint8_t* fingerpri
       || (rule.scope == Region && !_state.region[0])) return Rejected;
   bool verified = false;
   uint8_t signed_bytes[SignedSize];
-  const uint8_t empty[PUB_KEY_SIZE]{};
-  for (const auto& peer : _state.trusted_peers) {
-    if (memcmp(peer, empty, sizeof(empty)) == 0 || node.matches(peer)
+  const auto scope = static_cast<Scope>(rule.scope);
+  for (const auto& entry : _state.authorities) {
+    const auto* peer = entry.key;
+    if (!(entry.permissions & scopePermission(scope)) || node.matches(peer)
         || memcmp(peer, fingerprint, FingerprintSize) != 0) continue;
     const auto decision = decide(Repeater, peer);
     if (decision == Denied || (mode() == Locked && decision != Allowed)) continue;
@@ -682,7 +807,7 @@ RuleStore::MergeResult RuleStore::mergeRule(Rule& rule, const uint8_t* fingerpri
     }
   }
   if (!verified) return Rejected;
-  if (decodeRevision(rule.revision) <= checkpointFloor(_state, rule.origin, static_cast<Scope>(rule.scope))) return Current;
+  if (decodeRevision(rule.revision) <= checkpointFloor(_state, rule.origin, scope)) return Current;
 
   size_t index = 0;
   for (; index < _state.count; index++) {
@@ -1093,6 +1218,10 @@ void RuleStore::handleCommand(const char* command, char* reply, const mesh::Loca
   if (changed) {
     if (changed->scope != Local && !can_publish) {
       strcpy(reply, "Err - admin permission required for shared rules");
+      return;
+    }
+    if (changed->scope != Local && !publisherAllowed(static_cast<Scope>(changed->scope), node.pub_key, node)) {
+      strcpy(reply, "Err - local issuer has no publishing authority for this scope");
       return;
     }
     memcpy(changed->issuer, issuer ? issuer->pub_key : node.pub_key, PUB_KEY_SIZE);

@@ -16,6 +16,7 @@ Build and flash development firmware as each feature lands. Formal native and fo
 | Locked mode and enrollment freeze | IN PROGRESS (RF validation pending) | Fresh allowlisted transit, persistent independent freeze, conservative expiry, and local operator recovery. |
 | Direct-neighbour notifications | VERIFIED (build) | Private-channel notices for verified zero-hop observations, with a bounded deduplication table and send interval. |
 | Policy synchronization | VERIFIED (build) | Signed, encrypted global and regional updates between provisioned repeaters, including deletion records and explicit reconciliation. |
+| Scoped publishing authority and subnet membership | IN PROGRESS (RF validation pending) | Independent named subnet settings and scoped publisher grants. Durable USB retirement removes accepted rules for a compromised origin in that scope. Authenticated peer sessions and subnet-wide mode enforcement follow. |
 | Optional room identity | VERIFIED (build) | Separate persistent room identity, signed contact export, and a read-only room adapter. It defaults off pending stock Android validation. |
 | RAK3401 development flash | VERIFIED | USB DFU completed. The repeater returned in application mode and responded to `rules status` with revision 0, open mode, and capacity for 24 records. |
 | Formal validation and release | TODO | Validate native behavior, the four-device RF matrix, and stock Android interoperability in the formal validation phase. |

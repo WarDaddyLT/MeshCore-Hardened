@@ -208,6 +208,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void sendNeighbourNotice();
   void handleNeighbourCommand(const char* command, char* reply, bool usb);
   bool handleSyncCommand(const char* command, char* reply, bool usb, bool can_write);
+  bool handleAuthorityCommand(const char* command, char* reply, bool usb, bool can_write);
   void sendPolicyUpdate();
   mesh::DispatcherAction receivePolicyUpdate(mesh::Packet* packet);
   static bool isCheckpointPacket(const mesh::Packet& packet);

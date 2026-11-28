@@ -755,7 +755,7 @@ void MyMesh::sendPolicyUpdate() {
       || (_next_policy_tx && !millisHasNowPassed(_next_policy_tx))) return;
   for (; _sync_cursor < RuleStore::Capacity; ++_sync_cursor) {
     const auto* rule = _rules.exportRule(_sync_cursor);
-    if (!rule || (!self_id.matches(rule->origin) && !_rules.trustedPeer(rule->origin))) continue;
+    if (!rule || !_rules.publisherAllowed(static_cast<RuleStore::Scope>(rule->scope), rule->origin, self_id)) continue;
     TransportKey transport{};
     if (rule->scope == RuleStore::Region) {
       auto region = region_map.findByName(_rules.scopeName(RuleStore::Region));
@@ -782,6 +782,7 @@ void MyMesh::sendPolicyUpdate() {
 }
 
 bool MyMesh::handleSyncCommand(const char* command, char* reply, bool usb, bool can_write) {
+  if (handleAuthorityCommand(command, reply, usb, can_write)) return true;
   if (matchesValue(command, "sync status")) {
     snprintf(reply, 150, "domain=%s region=%s key=%s sync=%s", _rules.scopeName(RuleStore::Global),
              _rules.scopeName(RuleStore::Region),
@@ -835,6 +836,66 @@ bool MyMesh::handleSyncCommand(const char* command, char* reply, bool usb, bool 
     return true;
   }
   return false;
+}
+
+bool MyMesh::handleAuthorityCommand(const char* command, char* reply, bool usb, bool can_write) {
+  const char* args;
+  if (matchCommand(command, "subnet", &args)) {
+    if (!*args) {
+      const auto* name = _rules.scopeName(RuleStore::Subnet);
+      snprintf(reply, 150, "subnet=%s", *name ? name : "none");
+    } else {
+      const bool ok = usb && _rules.setScope(RuleStore::Subnet, args);
+      strcpy(reply, ok ? "OK" : "Err - use USB with an unused valid subnet name");
+    }
+    return true;
+  }
+
+  const bool publisher = matchCommand(command, "publisher", &args);
+  const bool relay = !publisher && matchCommand(command, "relay", &args);
+  const bool inspect = !publisher && !relay && matchCommand(command, "authority", &args);
+  if (!publisher && !relay && !inspect) return false;
+  if (!(inspect ? can_write : usb)) {
+    strcpy(reply, inspect ? "Err - admin permission required" : "Err - use USB for authority changes");
+    return true;
+  }
+  RuleStore::Scope scope = RuleStore::Local;
+  bool grant = false;
+  if (publisher) {
+    grant = matchCommand(args, "grant", &args);
+    if (!grant && !matchCommand(args, "retire", &args)) {
+      strcpy(reply, "Err - use publisher grant|retire global|region|subnet <key>");
+      return true;
+    }
+    if (matchCommand(args, "global", &args)) scope = RuleStore::Global;
+    else if (matchCommand(args, "region", &args)) scope = RuleStore::Region;
+    else if (matchCommand(args, "subnet", &args)) scope = RuleStore::Subnet;
+    else {
+      strcpy(reply, "Err - use global, region or subnet scope");
+      return true;
+    }
+  } else if (relay) {
+    grant = matchCommand(args, "allow", &args);
+    if (!grant && !matchCommand(args, "remove", &args)) {
+      strcpy(reply, "Err - use relay allow|remove <key>");
+      return true;
+    }
+  }
+  uint8_t key[PUB_KEY_SIZE];
+  if (!savemesh::isHex(args, 2 * sizeof(key)) || !mesh::Utils::fromHex(key, sizeof(key), args)
+      || mesh::Utils::isZeroes(key, sizeof(key))) {
+    strcpy(reply, "Err - expected full nonzero public key");
+  } else if (inspect) {
+    _rules.describeAuthority(key, self_id, reply);
+  } else {
+    const bool ok = publisher ? _rules.setPublisher(scope, key, grant) : _rules.setRelay(key, grant);
+    if (ok && publisher && !grant) {
+      _checkpoint_transfer = CheckpointTransfer::Idle;
+      if (_sync_cursor < RuleStore::Capacity) _sync_cursor = 0;
+    }
+    strcpy(reply, ok ? "OK" : "Err - scope unavailable, issuer retired or authority storage unavailable");
+  }
+  return true;
 }
 
 void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const mesh::Identity &sender,

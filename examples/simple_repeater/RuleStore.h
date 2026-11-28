@@ -15,7 +15,7 @@ public:
   enum Kind : uint8_t { Allow = 1, Deny, Filter };
   enum Subject : uint8_t { AnyDevice, Client, Repeater, OneByte, Data, Public };
   enum Decision : uint8_t { Unknown, Allowed, Denied };
-  enum Scope : uint8_t { Local, Region, Global };
+  enum Scope : uint8_t { Local, Region, Global, Subnet };
   // Keep the on-disk values used by open and restricted in v5–v7 snapshots.
   enum Mode : uint8_t { Normal = 0, LegacyRestricted = 1, Protected = 2, Locked = 3 };
 
@@ -73,6 +73,11 @@ public:
   bool setTrustedPeer(const uint8_t* key, bool trust, const mesh::Identity& node);
   const char* scopeName(Scope scope) const;
   bool trustedPeer(const uint8_t* key) const;
+  bool publisherAllowed(Scope scope, const uint8_t* key, const mesh::Identity& node) const;
+  bool setPublisher(Scope scope, const uint8_t* key, bool grant);
+  bool relayAllowed(const uint8_t* key) const;
+  bool setRelay(const uint8_t* key, bool allow);
+  void describeAuthority(const uint8_t* key, const mesh::Identity& node, char* reply) const;
   const Rule* exportRule(size_t index) const;
   MergeResult mergeRule(Rule& rule, const uint8_t* fingerprint, const mesh::Identity& node);
   bool makeCheckpoint(Scope scope, const mesh::LocalIdentity& node, Checkpoint& checkpoint,
@@ -87,6 +92,14 @@ public:
                      bool can_publish, bool& sync_requested, uint64_t uptimeMs = 0);
 
 private:
+  static constexpr uint8_t RelayPermission = 1;
+  struct Authority {
+    uint8_t key[PUB_KEY_SIZE];
+    uint8_t permissions;
+    uint8_t retired;
+  };
+  static constexpr uint8_t scopePermission(Scope scope) { return uint8_t(1) << scope; }
+
   struct OriginFloor {
     uint8_t key[PUB_KEY_SIZE];
     uint8_t global[4];
@@ -120,6 +133,8 @@ private:
     probation::Snapshot probation;
     probation::Seconds freeze_seconds;
     OriginFloor floors[9];
+    char subnet[ScopeNameSize];
+    Authority authorities[12];
     uint8_t digest[32];
   };
 
@@ -141,6 +156,8 @@ private:
   static size_t reserveRuleSlot(Snapshot& snapshot);
   static void signableBytes(const Snapshot& snapshot, const Rule& rule, uint8_t* bytes);
   static uint32_t checkpointFloor(const Snapshot& snapshot, const uint8_t* origin, Scope scope);
+  static Authority* authorityFor(Snapshot& snapshot, const uint8_t* key);
+  const Authority* authorityFor(const uint8_t* key) const;
   const char* parseScope(const char* input, uint8_t& scope) const;
   int find(const char* id) const;
   void describe(size_t index, char* reply) const;
