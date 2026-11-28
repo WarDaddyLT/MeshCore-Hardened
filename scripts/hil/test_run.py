@@ -3,11 +3,13 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 from run import RAW_RX, ROLES, Skip, decode_advert, decode_public_text, find_unacknowledged_deny, pin_keys, write_report
-from run import CONTACT_INFO, CONTACT_MESSAGE, CONTACT_MESSAGE_V3, Failure, decode_cli_reply
+from run import CONTACT_INFO, CONTACT_MESSAGE, CONTACT_MESSAGE_V3, Failure, decode_cli_reply, find_unacknowledged_rule
 from run import test_remote_acl as run_remote_acl
+from run import pairs, test_shared_rule_recovery as run_shared_rule_recovery
 
 
 class AdvertTest(unittest.TestCase):
@@ -52,6 +54,76 @@ class CleanupTest(unittest.TestCase):
                 }[command]
 
         self.assertEqual(find_unacknowledged_deny(Device(), key, 4), rule_id)
+
+    def test_lost_acknowledgment_recovers_only_the_expected_scope(self):
+        key = "12" * 32
+        rule_id = "34" * 16
+
+        class Device:
+            name = "R1"
+
+            def cli(self, command):
+                return {
+                    "rules status": "rev=5 capacity=24",
+                    "rules list 0": f"next=1 {rule_id} deny client {key} global:bench",
+                    "rules list 1": "End",
+                }[command]
+
+        self.assertEqual(find_unacknowledged_rule(Device(), "deny", key, 4, "global:bench"), rule_id)
+        with self.assertRaisesRegex(Failure, "could not confirm"):
+            find_unacknowledged_deny(Device(), key, 4)
+
+
+class SharedRuleTest(unittest.TestCase):
+    def test_deletion_waits_for_reconnection_and_restores_forwarding(self):
+        rule_id = "ab" * 16
+        state = {"R1": False, "R2": False, "R1_session": True, "R2_session": True}
+
+        class Repeater:
+            def __init__(self, name, key):
+                self.name, self.key = name, key
+
+            def cli(self, command):
+                if command == "rules sync status":
+                    return "domain=bench"
+                if command.startswith("rules authority "):
+                    return "global=allowed"
+                if command.startswith("rules peer status domain "):
+                    return "peer=authenticated" if state[self.name + "_session"] else "peer=offline"
+                if command.startswith("rules device client "):
+                    return "trust=denied" if state[self.name] else "trust=unknown"
+                if command == "rules status":
+                    return "rev=1"
+                if command.startswith("rules add deny client "):
+                    state["R1"] = state["R2"] = True
+                    return f"OK {rule_id}"
+                if command == f"rules show {rule_id}":
+                    return rule_id if state[self.name] else "Err - no active rule"
+                if command.startswith("rules peer disconnect domain "):
+                    state[self.name + "_session"] = False
+                    return "OK"
+                if command == f"rules delete {rule_id}":
+                    if state["R1_session"] or state["R2_session"]:
+                        raise AssertionError("deny deleted before the domain session went offline")
+                    state["R1"] = False
+                    return "OK"
+                if command.startswith("rules peer connect domain "):
+                    state["R1_session"] = state["R2_session"] = True
+                    state["R2"] = state["R1"]
+                    return "OK"
+                raise AssertionError(command)
+
+        def wait(device, command, expected):
+            self.assertEqual(pairs(device.cli(command)), expected)
+
+        devices = {"R1": Repeater("R1", "11" * 32), "R2": Repeater("R2", "22" * 32),
+                   "ACTOR": SimpleNamespace(key="33" * 32)}
+        report = {"samples": [], "cleanup": {}, "temporary_rules": {}}
+        with patch("run.wait_for_policy", side_effect=wait), patch("run.sample") as sample:
+            run_shared_rule_recovery(devices, report)
+        self.assertEqual([call.args[3] for call in sample.call_args_list], [False, True])
+        self.assertEqual(report["cleanup"], {"shared deny": "removed"})
+        self.assertEqual(report["temporary_rules"], {"shared deny": rule_id})
 
 
 class FilterEvidenceTest(unittest.TestCase):
