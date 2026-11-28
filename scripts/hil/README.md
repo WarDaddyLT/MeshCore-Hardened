@@ -7,7 +7,7 @@ The actor scenario checks whether two Hardened repeaters drop a banned device's 
 | R1 | RAK 1W | MeshCore Hardened repeater with `rules device` |
 | R2 | ThinkNode M5 | MeshCore Hardened repeater with `rules device` |
 | ADMIN | Wio Tracker L1 Pro e-ink | USB-capable admin bench build of MeshCore Companion |
-| ACTOR | T-Echo Lite Kit | Stock MeshCore USB Companion |
+| ACTOR | Wio Tracker L1 OLED (Raigardas) | Stock USB Companion protocol |
 
 ## Run from CLion
 
@@ -42,6 +42,20 @@ python scripts/hil/run.py --suite actor --isolated-rf --report out/hil/actor
 ```
 
 The runner writes JSON, JUnit XML and Markdown reports. The JSON includes both repeaters' forwarding counters and path evidence from the observing Companion. It fingerprints the enrolled bench identities and omits passwords, private keys and private channel secrets. If temporary rule cleanup fails, the report lists the exact rule IDs to inspect and remove. A successfully deleted rule can leave a tombstone in current firmware.
+
+## Repeatable USB setup
+
+From CLion's Terminal, select the four connected ports in the local config and run:
+
+```sh
+./scripts/hil/bench.sh setup --observer /path/outside/the/repository/hardened-bench.txt
+```
+
+The command checks and pins the four USB identities, sets EU/UK (Narrow) and the `hardened` flood scope, enables repeater forwarding for that scope, disables periodic repeater adverts, and shares or reuses a private **Hardened Bench** channel on the companions. Set optional `display_name` in each role to choose its bench name. The observer file contains the private channel key and is restricted to its owner. Firmware installation is separate from setup.
+
+The setup records the direct-adverts-only preference in the local fixture. Suites that require repeated signed adverts report SKIP under that preference. To send one ordinary scoped private ACTOR message for an observer, add `--check-channel --isolated-rf`. This checks the repeaters' TX counters and leaves the observer's inbox untouched.
+
+To replace ACTOR, add `--actor-serial <USB-serial> --actor-name <existing-name>`. The runner checks that the replacement reports the selected name before it updates the fixture. After installing an exact image, add `--record-image ROLE COMMIT PATH` for each flashed role to record its source and SHA-256 in the local config.
 
 ## SaveMeshcore comparison setup
 

@@ -1032,11 +1032,16 @@ REMAINING = ("remaining ACL cases", "complete filter regression", "physical part
              "stock Android and room identity", "signed neighbour notices", "baseline comparison")
 
 
-def run_scenarios(devices, report, selected):
+FLOOD_ADVERT_SUITES = {"actor", "filtering", "security", "shared", "onboarding-manual", "onboarding-peer"}
+
+
+def run_scenarios(devices, report, selected, direct_adverts_only=False):
     for name in selected:
         result = {"name": name, "samples": [], "temporary_rules": {}, "cleanup": {}}
         callback, passed = (SCENARIOS | PREPARED_SCENARIOS)[name]
         try:
+            if direct_adverts_only and name in FLOOD_ADVERT_SUITES:
+                raise Skip("This suite requires flood adverts. The fixture allows direct adverts only.")
             callback(devices, result)
             result.update(status="PASS", reason=passed)
         except Skip as err:
@@ -1152,7 +1157,8 @@ def main():
                     stage = "RF"
                     report["isolated_rf"] = True
                     try:
-                        run_scenarios(devices, report, selected)
+                        run_scenarios(devices, report, selected,
+                                      direct_adverts_only=config.get("direct_adverts_only") is True)
                         status = "PASS"
                         if any(case["status"] == "FAIL" for case in report["cases"]):
                             status = "FAIL"
