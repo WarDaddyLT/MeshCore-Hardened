@@ -8,8 +8,50 @@ import xml.etree.ElementTree as ET
 
 from run import RAW_RX, ROLES, Skip, decode_advert, decode_public_text, find_unacknowledged_deny, pin_keys, write_report
 from run import CONTACT_INFO, CONTACT_MESSAGE, CONTACT_MESSAGE_V3, Failure, decode_cli_reply, find_unacknowledged_rule
-from run import test_remote_acl as run_remote_acl
+from run import test_manual_onboarding as run_manual_onboarding, test_remote_acl as run_remote_acl
 from run import pairs, test_shared_rule_recovery as run_shared_rule_recovery
+
+
+class ManualOnboardingTest(unittest.TestCase):
+    def test_hold_probe_precedes_review_and_commit(self):
+        token = "0000000702"
+        pending = "subnet=bench onboarding=pending source=manual transit=held"
+        active = "subnet=bench onboarding=active source=manual transit=available"
+
+        class Joining:
+            state = pending
+            revision = 7
+
+            def cli(self, command):
+                if command == f"rules onboarding commit {token}":
+                    self.state = active
+                    self.revision = 8
+                    return "OK - committed rev=8 transit=available"
+                return {
+                    "rules onboarding": self.state,
+                    "rules status": f"rev={self.revision}",
+                    "rules onboarding review": f"review={token} subnet=bench mode=normal filters=0/1/0 repeat=on",
+                }[command]
+
+        joining = Joining()
+        devices = {"R1": SimpleNamespace(cli=lambda command: active), "R2": joining}
+        report = {"samples": [], "cleanup": {}}
+        observed = []
+
+        def observe(devices, sender, observer, forward, report, held_repeater=None):
+            observed.append((joining.state, forward, held_repeater))
+
+        with patch("run.sample", side_effect=observe):
+            run_manual_onboarding(devices, report)
+        self.assertEqual(observed, [(pending, True, "R2"), (active, True, None)])
+        self.assertEqual(report["samples"][0]["revision_after"], "8")
+
+    def test_no_probe_or_write_if_already_active(self):
+        active = "subnet=bench onboarding=active source=manual transit=available"
+        devices = {role: SimpleNamespace(cli=lambda command: active) for role in ("R1", "R2")}
+        with patch("run.sample") as sample, self.assertRaisesRegex(Skip, "Set up R2"):
+            run_manual_onboarding(devices, {})
+        sample.assert_not_called()
 
 
 class AdvertTest(unittest.TestCase):
