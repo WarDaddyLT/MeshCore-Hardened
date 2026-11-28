@@ -3,8 +3,9 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+import xml.etree.ElementTree as ET
 
-from run import RAW_RX, ROLES, Skip, decode_advert, find_unacknowledged_deny, pin_keys
+from run import RAW_RX, ROLES, Skip, decode_advert, decode_public_text, find_unacknowledged_deny, pin_keys, write_report
 
 
 class AdvertTest(unittest.TestCase):
@@ -49,6 +50,35 @@ class CleanupTest(unittest.TestCase):
                 }[command]
 
         self.assertEqual(find_unacknowledged_deny(Device(), key, 4), rule_id)
+
+
+class FilterEvidenceTest(unittest.TestCase):
+    def test_public_text_payload_fingerprint_survives_forwarding(self):
+        payload = bytes((0x11, 0x1f, 0x34)) + bytes(16)
+        direct = decode_public_text(bytes((RAW_RX, 0, 0, 0x15, 0)) + payload)
+        relayed = decode_public_text(bytes((RAW_RX, 0, 0, 0x15, 0x41, 0xab, 0xcd)) + payload)
+        self.assertEqual(direct[0], relayed[0])
+        self.assertEqual(direct[1], [])
+        self.assertEqual(relayed[1], ["abcd"])
+        self.assertIsNone(decode_public_text(bytes((RAW_RX, 0, 0, 0x15, 0)) + payload[:-1]))
+
+
+class ReportTest(unittest.TestCase):
+    def test_keeps_individual_pass_fail_and_skip_results(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "bench"
+            report = {"status": "FAIL", "reason": "see cases", "run_id": "test", "started": "test",
+                      "operation": "all", "devices": {}, "samples": [], "cleanup": {},
+                      "cases": [{"name": "actor", "status": "PASS", "reason": "verified"},
+                                {"name": "filtering", "status": "FAIL", "reason": "no path"},
+                                {"name": "sync", "status": "SKIP", "reason": "bench not ready"}]}
+            write_report(path, report)
+            suite = ET.parse(path.with_suffix(".xml")).getroot()
+            self.assertEqual(suite.attrib["tests"], "3")
+            self.assertEqual(suite.attrib["failures"], "1")
+            self.assertEqual(suite.attrib["skipped"], "1")
+            self.assertIsNotNone(suite.find("testcase[@name='filtering']/failure"))
+            self.assertIsNotNone(suite.find("testcase[@name='sync']/skipped"))
 
 
 class PinTest(unittest.TestCase):

@@ -31,6 +31,10 @@ CONFIG = Path(__file__).with_name("hil_config.local.json")
 DEVICE_QUERY = 22
 APP_START = 1
 SEND_SELF_ADVERT = 7
+SEND_CHANNEL_TEXT = 3
+GET_CHANNEL = 31
+CHANNEL_INFO = 18
+PUBLIC_KEY = bytes.fromhex("8b3387e9c5cd6a6ac9e5edbaa115cd72")
 DEVICE_INFO = 13
 SELF_INFO = 5
 RAW_RX = 0x88
@@ -52,14 +56,13 @@ def fingerprint(key):
     return sha256(bytes.fromhex(key)).hexdigest()[:12]
 
 
-def decode_advert(frame, origin):
-    """Extract only signed-advert routing metadata from a stock raw RX event."""
+def decode_flood(frame, payload_type, minimum):
     if not frame or frame[0] != RAW_RX or len(frame) < 5:
         return None
     raw = frame[3:]
     header = raw[0]
     route = header & 3
-    if header >> 6 or ((header >> 2) & 15) != 4 or route not in (0, 1):
+    if header >> 6 or ((header >> 2) & 15) != payload_type or route not in (0, 1):
         return None
     cursor = 5 if route == 0 else 1
     if len(raw) <= cursor:
@@ -67,15 +70,34 @@ def decode_advert(frame, origin):
     size = (raw[cursor] >> 6) + 1
     count = raw[cursor] & 63
     path_end = cursor + 1 + size * count
-    if size > 3 or path_end + 100 > len(raw):
+    if size > 3 or path_end + minimum > len(raw):
         return None
-    if raw[path_end:path_end + 32] != origin:
-        return None
-    stamp = int.from_bytes(raw[path_end + 32:path_end + 36], "little")
-    # Group copies of an identical signed advert, independent of the path.
-    advert = sha256(raw[path_end:]).hexdigest()[:16]
     path = [raw[i:i + size].hex() for i in range(cursor + 1, path_end, size)]
+    return raw[path_end:], path
+
+
+def decode_advert(frame, origin):
+    """Extract signed-advert routing metadata from a stock raw RX event."""
+    observation = decode_flood(frame, 4, 100)
+    if not observation:
+        return None
+    payload, path = observation
+    if payload[:32] != origin:
+        return None
+    stamp = int.from_bytes(payload[32:36], "little")
+    # Group copies of an identical signed advert, independent of the path.
+    advert = sha256(payload).hexdigest()[:16]
     return {"stamp": stamp, "advert": advert, "path": path}
+
+
+def decode_public_text(frame):
+    observation = decode_flood(frame, 5, 19)
+    if not observation:
+        return None
+    payload, path = observation
+    if payload[0] != 0x11 or (len(payload) - 3) % 16:
+        return None
+    return sha256(payload).hexdigest()[:16], path
 
 
 def ports():
@@ -212,10 +234,11 @@ class Device:
         drops = pairs(self.cli("rules drops"))
         return {key: int(value) for key, value in (
             ("flood_tx", counters["flood_tx"]), ("flood_rx", counters["flood_rx"]),
-            ("identity", drops["identity"]))}
+            ("identity", drops["identity"]), ("probation", drops.get("probation", 0)),
+            ("locked", drops.get("locked", 0)), ("filter", drops.get("filter", 0)))}
 
 
-def sample(devices, sender, observer, expect_forward, report):
+def sample(devices, sender, observer, expect_forward, report, drop_reason="identity"):
     before = {role: devices[role].stats() for role in REPEATERS}
     rx, tx = devices[observer], devices[sender]
     rx.usb.reset_input_buffer()
@@ -246,11 +269,15 @@ def sample(devices, sender, observer, expect_forward, report):
             if not hop or deltas[role]["flood_tx"] == 0:
                 raise Failure(f"No matching path and TX count proved {role} forwarded {sender}.")
         elif (not advert["direct"] or hop or deltas[role]["flood_tx"]
-              or not deltas[role]["flood_rx"] or not deltas[role]["identity"]):
+              or not deltas[role]["flood_rx"] or not deltas[role][drop_reason]):
             raise Failure(f"Could not prove that {role} dropped the received {sender} advert.")
 
 
 def find_unacknowledged_deny(device, key, revision):
+    return find_unacknowledged_rule(device, "deny", key, revision)
+
+
+def find_unacknowledged_rule(device, expected_kind, key, revision):
     # Only recover a lost acknowledgment when exactly one policy change
     # occurred and the newly visible rule matches this isolated trial.
     status = pairs(device.cli("rules status"))
@@ -268,11 +295,11 @@ def find_unacknowledged_deny(device, key, revision):
         next_cursor = int(next_field.removeprefix("next="))
         if next_cursor <= cursor:
             raise Failure(f"{device.name} returned an invalid rule cursor.")
-        if (kind, subject, value.lower(), scope) == ("deny", "client", key, "local"):
+        if (kind, subject, value.lower(), scope) == (expected_kind, "client", key, "local"):
             matches.append(rule_id)
         cursor = next_cursor
     if len(matches) != 1 or not re.fullmatch(r"[0-9a-fA-F]{32}", matches[0]):
-        raise Failure(f"{device.name} could not confirm the temporary deny ID.")
+        raise Failure(f"{device.name} could not confirm the temporary {expected_kind} ID.")
     return matches[0]
 
 
@@ -320,6 +347,197 @@ def test(devices, report):
         if any(value != "removed" for value in report["cleanup"].values()):
             raise Failure("A temporary deny could not be confirmed removed. See report cleanup.")
     sample(devices, "ACTOR", "ADMIN", True, report)
+
+
+def test_modes(devices, report):
+    actor, admin = devices["ACTOR"].key, devices["ADMIN"].key
+    for role in REPEATERS:
+        info = pairs(devices[role].cli(f"rules device client {actor}"))
+        if info.get("trust") != "unknown" or "probation-hours" in info:
+            raise Skip(f"{role} needs ACTOR to be unknown with no existing probation.")
+        if "probation" not in pairs(devices[role].cli("rules drops")):
+            raise Skip(f"{role} does not expose the required mode diagnostics.")
+
+    added = {}
+    touched = []
+    try:
+        for role in REPEATERS:
+            device = devices[role]
+            if pairs(device.cli(f"rules device client {admin}")).get("trust") == "allowed":
+                continue
+            revision = int(pairs(device.cli("rules status"))["rev"])
+            report["cleanup"][f"{role} admin allow"] = "unconfirmed; inspect rules list"
+            try:
+                reply = device.cli(f"rules add allow client {admin} local")
+            except (Failure, OSError, serial.SerialException):
+                reply = ""
+            match = RULE.fullmatch(reply)
+            rule_id = match[1] if match else find_unacknowledged_rule(device, "allow", admin, revision)
+            if not rule_id:
+                report["cleanup"].pop(f"{role} admin allow")
+                raise Failure(f"{role} did not create an ADMIN allow rule.")
+            added[role] = rule_id
+            report["temporary_rules"][f"{role} admin allow"] = rule_id
+
+        for mode, counter in (("protected", "probation"), ("locked", "locked")):
+            for role in REPEATERS:
+                device = devices[role]
+                if role not in touched:
+                    touched.append(role)
+                report["cleanup"][f"{role} mode"] = "must restore Normal"
+                if device.cli(f"rules mode {mode}") != "OK" or pairs(device.cli("rules mode"))["mode"] != mode:
+                    raise Failure(f"{role} did not confirm {mode} mode.")
+            sample(devices, "ACTOR", "ADMIN", False, report, drop_reason=counter)
+            if mode == "protected":
+                for role in REPEATERS:
+                    info = pairs(devices[role].cli(f"rules device client {actor}"))
+                    if info.get("probation-hours") != "72":
+                        raise Failure(f"{role} did not record ACTOR's initial probation.")
+            sample(devices, "ADMIN", "ACTOR", True, report)
+    finally:
+        for role in touched:
+            try:
+                device = devices[role]
+                device.cli("rules mode normal")
+                if pairs(device.cli("rules mode")).get("mode") != "normal":
+                    raise Failure("mode restore not confirmed")
+                report["cleanup"][f"{role} mode"] = "removed"
+            except (Failure, OSError, serial.SerialException):
+                report["cleanup"][f"{role} mode"] = "manual cleanup required: rules mode normal"
+        for role, rule_id in added.items():
+            try:
+                device = devices[role]
+                if not device.cli(f"rules delete {rule_id}").startswith("OK"):
+                    raise Failure("deletion not acknowledged")
+                if pairs(device.cli(f"rules device client {admin}")).get("trust") != "unknown":
+                    raise Failure("allow still active")
+                report["cleanup"][f"{role} admin allow"] = "removed"
+            except (Failure, OSError, serial.SerialException):
+                report["cleanup"][f"{role} admin allow"] = f"manual cleanup required: rules delete {rule_id}"
+        if any(value != "removed" for value in report["cleanup"].values()):
+            raise Failure("Temporary mode or allow cleanup failed. See report cleanup.")
+    sample(devices, "ACTOR", "ADMIN", True, report)
+
+
+def sample_public_text(devices, expect_forward, report):
+    before = {role: devices[role].stats() for role in REPEATERS}
+    observer, sender = devices["ADMIN"], devices["ACTOR"]
+    observer.usb.reset_input_buffer()
+    observer.buffer.clear()
+    text = f"HIL filter {uuid.uuid4().hex[:12]}".encode("ascii")
+    sender.request(bytes((SEND_CHANNEL_TEXT, 0, 0)) + struct.pack("<I", int(time.time())) + text, 0)
+    frames = {}
+    end = time.monotonic() + 10
+    while time.monotonic() < end:
+        observation = decode_public_text(observer.frame())
+        if observation:
+            digest, path = observation
+            frames.setdefault(digest, []).append(path)
+    after = {role: devices[role].stats() for role in REPEATERS}
+    deltas = {role: {key: (after[role][key] - before[role][key]) & 0xffffffff
+                     for key in before[role]} for role in REPEATERS}
+    report["samples"].append({"sender": "ACTOR", "observer": "ADMIN", "type": "Public text",
+                              "expect_forward": expect_forward, "frames": frames, "deltas": deltas})
+    if len(frames) != 1:
+        raise Failure("Did not capture one unambiguous Public text packet.")
+    paths = next(iter(frames.values()))
+    for role in REPEATERS:
+        hop = any(path and path[-1] == devices[role].key[:len(path[-1])] for path in paths)
+        counters = deltas[role]
+        if expect_forward:
+            if not hop or not counters["flood_tx"]:
+                raise Failure(f"No path and TX evidence of {role} forwarding Public text.")
+        elif [] not in paths or hop or counters["flood_tx"] or not counters["flood_rx"] or not counters["filter"]:
+            raise Failure(f"No direct observation and filter-drop evidence from {role}.")
+
+
+def test_filtering(devices, report):
+    for role in ("ADMIN", "ACTOR"):
+        channel = devices[role].request(bytes((GET_CHANNEL, 0)), CHANNEL_INFO)
+        if len(channel) < 50 or channel[34:50] != PUBLIC_KEY:
+            raise Skip(f"{role} channel 0 needs the stock Public channel on the isolated bench.")
+    for role in REPEATERS:
+        if devices[role].cli("filter public").lstrip("> ") != "filter public off":
+            raise Skip(f"{role} must start with the Public filter off.")
+    touched = []
+    try:
+        sample_public_text(devices, True, report)
+        for role in REPEATERS:
+            device = devices[role]
+            touched.append(role)
+            report["cleanup"][f"{role} Public filter"] = "must restore off"
+            device.cli("filter public on")
+            if device.cli("filter public").lstrip("> ") != "filter public on":
+                raise Failure(f"{role} did not confirm Public filtering.")
+        sample_public_text(devices, False, report)
+        sample(devices, "ADMIN", "ACTOR", True, report)
+    finally:
+        for role in touched:
+            try:
+                device = devices[role]
+                device.cli("filter public off")
+                if device.cli("filter public").lstrip("> ") != "filter public off":
+                    raise Failure("filter restore not confirmed")
+                report["cleanup"][f"{role} Public filter"] = "removed"
+            except (Failure, OSError, serial.SerialException):
+                report["cleanup"][f"{role} Public filter"] = "manual cleanup required: filter public off"
+        if any(value != "removed" for value in report["cleanup"].values()):
+            raise Failure("Temporary Public filter cleanup failed. See report cleanup.")
+    sample_public_text(devices, True, report)
+
+
+def wait_for_policy(device, command, expected, timeout=240):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        observed = pairs(device.cli(command))
+        if all(observed.get(field) == value for field, value in expected.items()):
+            return observed
+        time.sleep(2)
+    raise Failure(f"{device.name} did not report the expected policy state.")
+
+
+def test_sync(devices, report):
+    origin, peer = devices["R1"], devices["R2"]
+    starting = [pairs(device.cli("rules subnet mode")) for device in (origin, peer)]
+    if starting[0].get("subnet") in (None, "none") or starting[0].get("subnet") != starting[1].get("subnet"):
+        raise Skip("R1 and R2 need the same preconfigured test subnet.")
+    if any(state.get("mode") != "normal" or state.get("effective") != "normal" for state in starting):
+        raise Skip("Both repeaters need committed Normal subnet policy before this case.")
+    if starting[0].get("rev") != starting[1].get("rev"):
+        raise Skip("Start from the same committed subnet revision on both repeaters.")
+    for device, other in ((origin, peer), (peer, origin)):
+        if pairs(device.cli("rules onboarding")).get("onboarding") != "active":
+            raise Skip(f"{device.name} needs to complete onboarding before the sync case.")
+        if pairs(device.cli(f"rules peer status subnet {other.key}")).get("peer") != "authenticated":
+            raise Skip("Establish the authenticated subnet session before the sync case.")
+        if pairs(device.cli(f"rules authority {origin.key}")).get("subnet") != "allowed":
+            raise Skip(f"{device.name} needs R1's subnet publisher grant.")
+
+    status_command = f"rules subnet peer {peer.key}"
+    report["cleanup"]["subnet mode"] = "must restore Normal on both repeaters"
+    try:
+        started = time.monotonic()
+        if origin.cli("rules subnet mode protected") != "OK":
+            raise Failure("R1 did not acknowledge the signed mode update.")
+        local = pairs(origin.cli("rules subnet mode"))
+        if local.get("mode") != "protected" or local.get("rev") == starting[0]["rev"]:
+            raise Failure("R1 did not commit a new Protected subnet revision.")
+        applied = wait_for_policy(peer, "rules subnet mode", {"rev": local["rev"], "effective": "protected"})
+        delay = round(time.monotonic() - started, 2)
+        if not origin.cli(f"rules subnet peer query {peer.key}").startswith("OK"):
+            raise Failure("R1 did not queue the applied-policy query.")
+        confirmed = wait_for_policy(origin, status_command, {"confirmation": "confirmed", "rev": local["rev"]})
+        report["samples"].append({"type": "signed subnet mode", "origin": local, "applied": applied,
+                                  "confirmation": confirmed, "seconds_to_apply": delay})
+    finally:
+        try:
+            if origin.cli("rules subnet mode normal") != "OK":
+                raise Failure("Normal restore not acknowledged")
+            restored = pairs(origin.cli("rules subnet mode"))
+            wait_for_policy(peer, "rules subnet mode", {"rev": restored["rev"], "effective": "normal"})
+            report["cleanup"]["subnet mode"] = "removed"
+        except (Failure, KeyError, OSError, serial.SerialException):
+            raise Failure("Restore signed Normal policy on R1 and confirm its application on R2.") from None
 
 
 def preflight(devices, config):
@@ -377,13 +595,14 @@ def pin_keys(path, devices, config):
 def write_report(path, report):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.with_suffix(".json").write_text(json.dumps(report, indent=2) + "\n")
-    suite = ET.Element("testsuite", name="MeshCore four-device bench", tests="1",
-                       failures=str(int(report["status"] == "FAIL")),
-                       skipped=str(int(report["status"] == "SKIP")))
-    case = ET.SubElement(suite, "testcase", name=report["operation"])
-    if report["status"] != "PASS":
-        ET.SubElement(case, "failure" if report["status"] == "FAIL" else "skipped",
-                      message=report["reason"])
+    cases = report.get("cases") or [{"name": report["operation"], "status": report["status"], "reason": report["reason"]}]
+    suite = ET.Element("testsuite", name="MeshCore four-device bench", tests=str(len(cases)),
+                       failures=str(sum(case["status"] == "FAIL" for case in cases)),
+                       skipped=str(sum(case["status"] == "SKIP" for case in cases)))
+    for result in cases:
+        case = ET.SubElement(suite, "testcase", name=result["name"])
+        if result["status"] != "PASS":
+            ET.SubElement(case, "failure" if result["status"] == "FAIL" else "skipped", message=result["reason"])
     ET.ElementTree(suite).write(path.with_suffix(".xml"), encoding="utf-8", xml_declaration=True)
     rows = ["# MeshCore four-device bench", "", f"**{report['status']}** — {report['reason']}",
             "", f"Run: {report['run_id']}", f"Started: {report['started']}", "",
@@ -391,7 +610,38 @@ def write_report(path, report):
     rows.extend(f"- {role}: {device['board']} ({device['version']})"
                 for role, device in report["devices"].items())
     rows.extend(f"- Cleanup {role}: {message}" for role, message in report["cleanup"].items())
+    rows.extend(f"- {case['name']}: {case['status']} — {case['reason']}" for case in report.get("cases", []))
     path.with_suffix(".md").write_text("\n".join(rows) + "\n")
+
+
+SCENARIOS = {
+    "actor": (test, "Temporary attributable deny, legitimate forwarding, and cleanup verified."),
+    "filtering": (test_filtering, "Public filter forwarding, drops, unaffected adverts, and cleanup verified."),
+    "security": (test_modes, "Protected and Locked admission, legitimate forwarding, and cleanup verified."),
+    "sync": (test_sync, "Signed subnet propagation, peer confirmation, and Normal restore verified."),
+}
+
+REMAINING = ("stock remote ACL", "complete filter regression", "shared rules, deletion and onboarding",
+             "stock Android and room identity", "signed neighbour notices", "baseline comparison")
+
+
+def run_scenarios(devices, report, selected):
+    for name in selected:
+        result = {"name": name, "samples": [], "temporary_rules": {}, "cleanup": {}}
+        callback, passed = SCENARIOS[name]
+        try:
+            callback(devices, result)
+            result.update(status="PASS", reason=passed)
+        except Skip as err:
+            result.update(status="SKIP", reason=str(err))
+        except (Failure, KeyError, ValueError, OSError, serial.SerialException) as err:
+            result.update(status="FAIL", reason=str(err))
+        report["cases"].append(result)
+        report["samples"].extend(result["samples"])
+        for category in ("temporary_rules", "cleanup"):
+            report[category].update({f"{name}/{key}": value for key, value in result[category].items()})
+        if result["status"] == "FAIL":
+            break
 
 
 def main():
@@ -403,11 +653,11 @@ def main():
     actions.add_argument("--preflight", action="store_true", help="Check bench prerequisites without transmitting.")
     actions.add_argument("--smoke", action="store_true", help="Run the five-advert deny and cleanup scenario.")
     actions.add_argument("--suite", choices=("actor", "acl", "filtering", "security", "sync", "identity"))
-    actions.add_argument("--all", action="store_true", help="Run the only implemented RF scenario and list gaps.")
+    actions.add_argument("--all", action="store_true", help="Run implemented live scenarios and record remaining coverage.")
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--report", type=Path, default=Path("out/hil/actor"))
     parser.add_argument("--isolated-rf", action="store_true",
-                        help="Confirm legal settings and RF isolation and authorize temporary local policy writes.")
+                        help="Confirm legal settings and RF isolation and authorize temporary local bench settings.")
     args = parser.parse_args()
     if args.list:
         for port in ports():
@@ -418,8 +668,8 @@ def main():
 
     report = {"run_id": uuid.uuid4().hex, "started": datetime.now(timezone.utc).isoformat(),
               "operation": args.suite or ("preflight" if args.preflight else "identify" if args.identify
-                                          else "pin" if args.pin else "actor"),
-              "devices": {}, "samples": [], "temporary_rules": {}, "cleanup": {}}
+                                          else "pin" if args.pin else "all" if args.all else "actor"),
+              "devices": {}, "cases": [], "samples": [], "temporary_rules": {}, "cleanup": {}}
     stage = "preflight"
     try:
         if args.pin and args.config.name != "hil_config.local.json":
@@ -444,6 +694,9 @@ def main():
                 commit = config["roles"][role].get("firmware_git_sha", "")
                 if re.fullmatch(r"[0-9a-fA-F]{40}", commit):
                     device.details["configured_firmware_git_sha"] = commit
+                image_hash = config["roles"][role].get("firmware_sha256", "")
+                if re.fullmatch(r"[0-9a-fA-F]{64}", image_hash):
+                    device.details["configured_firmware_sha256"] = image_hash
                 report["devices"][role] = device.details
                 if args.identify:
                     print(f"{role} {device.details['board']}: {device.key}")
@@ -460,17 +713,32 @@ def main():
                 if args.preflight:
                     report.update(status="PASS", reason="Four-device preflight passed. RF not run.")
                 else:
-                    if args.suite not in (None, "actor", "acl"):
+                    selected = tuple(SCENARIOS) if args.all else ("actor" if args.suite == "acl" else args.suite or "actor",)
+                    if any(name not in SCENARIOS for name in selected):
                         raise Skip(f"The {args.suite} suite is not implemented in this runner.")
                     if not args.isolated_rf:
                         raise Skip("RF trials require --isolated-rf for the shielded or attenuated bench.")
                     stage = "RF"
                     try:
-                        test(devices, report)
-                        report.update(status="PASS", reason="Five stock adverts verified temporary deny, allowed forwarding and cleanup.")
+                        run_scenarios(devices, report, selected)
+                        status = "PASS"
+                        if any(case["status"] == "FAIL" for case in report["cases"]):
+                            status = "FAIL"
+                        elif args.all or args.suite == "acl" or any(case["status"] == "SKIP" for case in report["cases"]):
+                            status = "SKIP"
+                        covered = {case["name"] for case in report["cases"]}
+                        report["cases"].extend(
+                            {"name": name, "status": "SKIP", "reason": "Earlier scenario failed."}
+                            for name in selected if name not in covered
+                        )
                         if args.all or args.suite == "acl":
-                            report["unrun"] = ["full ACL", "filtering", "security", "sync", "identity"]
-                            report.update(status="SKIP", reason="Actor scenario passed. Remaining release coverage was not run.")
+                            report["unrun"] = list(REMAINING if args.all else ("stock remote ACL",))
+                            report["cases"].extend(
+                                {"name": name, "status": "SKIP", "reason": "Release coverage still pending."}
+                                for name in report["unrun"]
+                            )
+                        reason = f"{len(covered)} live scenario(s) recorded. See individual results."
+                        report.update(status=status, reason=reason)
                     finally:
                         for role in REPEATERS:
                             try:
@@ -483,6 +751,13 @@ def main():
         report.update(status="FAIL" if stage == "RF" else "SKIP", reason=f"{stage}: {err}")
     except KeyboardInterrupt:
         report.update(status="FAIL", reason="Interrupted; check cleanup and stored rule IDs.")
+    if args.all and not report["cases"]:
+        report["cases"] = [{"name": name, "status": "SKIP", "reason": report["reason"]}
+                           for name in (*SCENARIOS, *REMAINING)]
+    if report["cases"] and report["status"] == "FAIL" and not any(
+        case["status"] == "FAIL" for case in report["cases"]
+    ):
+        report["cases"].append({"name": "bench", "status": "FAIL", "reason": report["reason"]})
     write_report(args.report, report)
     print(f"{report['status']} — {report['reason']}")
     print(args.report.with_suffix(".json"))
