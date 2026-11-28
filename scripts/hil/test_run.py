@@ -10,7 +10,31 @@ from run import RAW_RX, ROLES, Skip, decode_advert, decode_public_text, find_una
 from run import CONTACT_INFO, CONTACT_MESSAGE, CONTACT_MESSAGE_V3, Device, Failure, decode_cli_reply, find_unacknowledged_rule
 from run import test_manual_onboarding as run_manual_onboarding, test_remote_acl as run_remote_acl
 from run import test_peer_onboarding as run_peer_onboarding
-from run import pairs, test_shared_rule_recovery as run_shared_rule_recovery
+from run import decode_quiet_receipt, quiet_criteria, quiet_summary, pairs, test_shared_rule_recovery as run_shared_rule_recovery
+
+
+class QuietDeliveryTest(unittest.TestCase):
+    def test_receipt_matches_stock_channel_frame_and_ignores_other_messages(self):
+        timestamp = 1795000020
+        text = b"HIL quiet 82fa0a29"
+        data = bytes((0, 0x42, 0)) + timestamp.to_bytes(4, "little") + b"Bench: " + text
+        self.assertEqual(decode_quiet_receipt(bytes((8,)) + data, text, timestamp), 2)
+        self.assertEqual(decode_quiet_receipt(bytes((17, 0, 0, 0)) + data, text, timestamp), 2)
+        self.assertIsNone(decode_quiet_receipt(bytes((17, 0)) + data, text, timestamp))
+        self.assertIsNone(decode_quiet_receipt(bytes((8,)) + data, text, timestamp + 1))
+        self.assertIsNone(decode_quiet_receipt(bytes((8,)) + data, b"unrelated", timestamp))
+
+    def test_quiet_thresholds_keep_missed_sends_in_the_denominator(self):
+        def results(good, seconds):
+            return quiet_summary([{"delivered": trial < good, "latency_s": seconds}
+                                  for trial in range(20)])
+
+        baseline = results(20, 5)
+        acceptable = quiet_criteria(results(19, 7), baseline)
+        self.assertEqual(acceptable, {"p95_limit_s": 7, "delivery_pass": True, "latency_pass": True})
+        self.assertFalse(quiet_criteria(results(18, 5), baseline)["delivery_pass"])
+        self.assertFalse(quiet_criteria(results(20, 7.1), baseline)["latency_pass"])
+        self.assertEqual(quiet_criteria(results(20, 12), results(20, 10))["p95_limit_s"], 12)
 
 
 class RepeaterPreflightTest(unittest.TestCase):

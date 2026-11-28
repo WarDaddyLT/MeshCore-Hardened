@@ -54,6 +54,17 @@ After installing the pinned SaveMeshcore builds on R1 and R2, keep the same four
 
 Run the second command after restoring the Hardened bench images. Inspect both reports for matching radio and inherited filter settings before the RF comparison. Baseline preflight recognizes the control firmware's CLI profile. The report identifies the configured images by the hashes entered by the operator. Both commands require all four devices and perform no RF trials or flashing.
 
+### Quiet delivery comparison
+
+In the isolated setup, arrange the radios so the receiving companion hears the sender through R1 and R2 in sequence. The comparison uses the stock Public channel in slot 0 on both companions. Keep Public filtering off on both repeaters and use matching inherited filters and radio settings for both runs. Confirm the duty cycle for the configured radio settings and reserve the ACTOR inbox for the test before setting `test_only_inboxes` to true.
+
+```sh
+./scripts/hil/bench.sh run --suite quiet --baseline --isolated-rf --report out/hil/quiet-baseline
+./scripts/hil/bench.sh run --suite quiet --baseline-report out/hil/quiet-baseline.json --isolated-rf --report out/hil/quiet-hardened
+```
+
+Install the baseline repeater images for the first run and the Hardened images for the second. Update each image's recorded hash and commit after installation. Each run sends 20 ordinary messages from ADMIN, at most one per minute. The runner counts a delivery when ACTOR reports the matching stock message with exactly two hops and both repeaters record a flood transmission. Latency covers send request to observed Companion inbox delivery, with a 15-second observation window. Direct reception counts as a missed routed delivery. The report applies the quiet acceptance thresholds from the implementation plan to the two matching profiles.
+
 ## What the scenario verifies
 
 - Both repeaters forward ADMIN and ACTOR before the deny.
