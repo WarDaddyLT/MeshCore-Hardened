@@ -113,11 +113,13 @@ void MyMesh::sendCheckpointPacket() {
       || (_next_policy_tx && !millisHasNowPassed(_next_policy_tx))) return;
   const auto scope = static_cast<RuleStore::Scope>(_checkpoint.scope);
   TransportKey transport{};
-  if (!checkpointTransport(scope, transport)) { _checkpoint_transfer = CheckpointTransfer::Idle; return; }
+  if (!checkpointTransport(scope, transport) || !_rules.publisherAllowed(scope, _checkpoint.origin, self_id)) {
+    _checkpoint_transfer = CheckpointTransfer::Idle;
+    return;
+  }
   if (!self_id.matches(_checkpoint.origin)) {
     const auto decision = _rules.decide(RuleStore::Repeater, _checkpoint.origin);
-    if (!_rules.trustedPeer(_checkpoint.origin) || decision == RuleStore::Denied
-        || (_rules.mode() == RuleStore::Locked && decision != RuleStore::Allowed)) {
+    if (decision == RuleStore::Denied || (_rules.mode() == RuleStore::Locked && decision != RuleStore::Allowed)) {
       _checkpoint_transfer = CheckpointTransfer::Idle;
       return;
     }

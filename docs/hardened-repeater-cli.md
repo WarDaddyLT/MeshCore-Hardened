@@ -148,15 +148,25 @@ rules sync.key <32-hex-private-sync-key>
 rules sync.key off
 rules trust <64-hex-repeater-public-key>
 rules untrust <64-hex-repeater-public-key>
+rules subnet [name]
+rules authority <64-hex-public-key>
+rules publisher grant|retire global|region|subnet <64-hex-public-key>
+rules relay allow|remove <64-hex-repeater-public-key>
 rules sync status
 rules sync
 rules checkpoint
 rules checkpoint global|region
 ```
 
-Configure the domain, sync key, and trusted origin keys over USB on each participating repeater. Use a dedicated randomly generated 16-byte sync key. For regional policy, configure the same region name in the [MeshCore region map](cli_commands.md#region-management-v110) on participating repeaters. Domain and region names accept up to 15 lowercase letters, digits, underscores, or hyphens. A scope name is fixed while it has signed records or a committed checkpoint.
+Configure the domain, sync key, and authorized origins over USB on each participating repeater. Use a dedicated randomly generated 16-byte sync key. For regional policy, configure the same region name in the MeshCore region map on participating repeaters. Domain, region, and subnet names accept up to 15 lowercase letters, digits, underscores, or hyphens. A scope name is fixed while it has signed records, a committed checkpoint, or scoped authority entries. [MeshCore region management](cli_commands.md#region-management-v110)
 
-Shared updates are signed with the originating repeater key after it authorizes the change. Peers verify that trusted origin signature independently. Sync messages are encrypted with AES-128-GCM and carry one update per packet. Local rules stay on their repeater. A write queues shared updates, and `rules sync` resends active rules and deletion records after a partition. Senders queue at most one update per minute. For a multi-hop reconciliation, run sync on intermediate trusted repeaters that already hold the current state. Untrusting a key stops future updates from that signer. Previously accepted records retain their last state.
+Shared updates are signed with the originating repeater key after it authorizes the change. Each receiving repeater checks the scope grant and verifies the origin signature independently. Sync messages are encrypted with AES-128-GCM and carry one update per packet. Local rules stay on their repeater. A write queues shared updates, and `rules sync` resends active rules and deletion records after a partition. Senders queue at most one update per minute. For a multi-hop reconciliation, run sync on intermediate repeaters that already hold the current state.
+
+`rules subnet <name>` assigns this repeater to one named managed subnet, independently of its MeshCore region. `rules authority <key>` reports peer, relay, and publisher settings. Peer and relay entries are configured independently for authenticated peer transport. Existing regional and global sync verifies the original publisher. Authenticated relay transport and subnet mode propagation are tracked separately. [Peer authentication](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/19) · [Subnet mode propagation](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/20)
+
+Grant a full origin key separately for each scope where a receiving repeater should accept its signatures. A repeater's own key can issue global and regional rules after configuring the corresponding scope. Subnet publishing requires its own grant. On upgrade, any previously trusted keys retain their existing global or regional publishing permissions. New `rules trust` entries grant peer permission only.
+
+To retire an unavailable or compromised publisher, run `rules publisher retire <scope> <key>` on each affected repeater over USB. This atomically removes that key's rules for the scope and blocks its later updates and checkpoints, including delayed copies. The retired key cannot be granted the same scope again. Grant a fresh key and reissue the intended rules to rotate it. Peer trust and other scope grants remain independent. The authority table holds 12 keys including retired entries. Retirements are local durable operations and require provisioning on each affected repeater.
 
 Run `rules checkpoint global` or `rules checkpoint region` on the originating repeater to reclaim its shared deletion slots for that scope. It commits a signed checkpoint and queues its active rules. A peer applies the checkpoint atomically after it receives and verifies every record. It preserves newer updates and ignores older updates covered by the committed checkpoint, including after reboot. A peer that installs a checkpoint queues it for relay. Its revision floor survives removing and re-adding the origin key. Checkpoint floor storage holds up to nine full origin keys including the local repeater.
 
