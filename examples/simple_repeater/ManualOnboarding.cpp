@@ -4,7 +4,8 @@ void MyMesh::handleOnboardingCommand(const char* command, char* reply, bool usb,
   const auto* subnet = _rules.scopeName(RuleStore::Subnet);
   if (!*command) {
     const char* state = !*subnet ? "unmanaged" : _rules.onboarding() ? "pending" : "active";
-    snprintf(reply, 150, "subnet=%s onboarding=%s transit=%s", *subnet ? subnet : "none", state,
+    snprintf(reply, 150, "subnet=%s onboarding=%s source=%s transit=%s", *subnet ? subnet : "none", state,
+             !*subnet ? "none" : _rules.peerPolicyStaged() ? "peer" : "manual",
              _rules.transitAllowed() && !_prefs.disable_fwd ? "available" : "held");
     return;
   }
@@ -27,6 +28,7 @@ void MyMesh::handleOnboardingCommand(const char* command, char* reply, bool usb,
     return;
   }
   if (peerOnboardingBusy()) { strcpy(reply, "Err - peer onboarding transfer pending"); return; }
+  if (!_rules.onboardingPolicyReady(self_id)) { strcpy(reply, "Err - staged peer authority unavailable"); return; }
   const uint8_t options = uint8_t(_filter_prefs.filter_1byte)
                         | uint8_t(_filter_prefs.filter_data << 1)
                         | uint8_t(_filter_prefs.filter_public << 2)
@@ -52,7 +54,7 @@ void MyMesh::handleOnboardingCommand(const char* command, char* reply, bool usb,
     strcpy(reply, "Err - policy changed; run rules onboarding review");
     return;
   }
-  if (!_rules.commitOnboarding(revision)) {
+  if (!_rules.commitOnboarding(revision, self_id)) {
     strcpy(reply, "Err - onboarding commit failed; transit held");
     return;
   }
