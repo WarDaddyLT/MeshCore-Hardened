@@ -149,10 +149,30 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   size_t _checkpoint_peer_cursor = 0;
   uint8_t _checkpoint_sender[PUB_KEY_SIZE]{};
   uint8_t _checkpoint_target[PUB_KEY_SIZE]{};
+  uint8_t _checkpoint_reconcile = 0;
   unsigned long _checkpoint_expiry = 0;
   static constexpr size_t PolicyPeerCapacity = 8;
   PolicyPeerSession _policy_peers[PolicyPeerCapacity];
   size_t _subnet_mode_cursor = PolicyPeerCapacity;
+  struct SubnetStatusReply {
+    uint8_t request[4];
+    uint8_t revision[8];
+    uint8_t publisher[PUB_KEY_SIZE];
+    uint8_t effective_mode;
+    uint8_t transit;
+  };
+  struct SubnetPeerStatus {
+    uint8_t peer[PUB_KEY_SIZE];
+    SubnetStatusReply last_reply;
+    uint32_t query;
+    uint32_t reply_query;
+    unsigned long query_until;
+    unsigned long reply_until;
+    unsigned long confirmed_until;
+    bool query_sent;
+  };
+  SubnetPeerStatus _subnet_status[PolicyPeerCapacity]{};
+  uint32_t _next_subnet_query = 0;
   uint32_t _peer_epoch = 0;
   uint32_t _peer_nonce_counter = 0;
   unsigned long _next_peer_epoch_attempt = 0;
@@ -230,6 +250,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void receiveSubnetMode(mesh::Packet& packet);
   void sendSubnetMode();
   void queueSubnetMode() { _subnet_mode_cursor = 0; }
+  static bool isSubnetStatusPacket(const mesh::Packet& packet);
+  bool handleSubnetStatusCommand(const char* command, char* reply, bool canWrite);
+  void receiveSubnetStatus(mesh::Packet& packet);
+  void sendSubnetStatus();
+  void policyPeerConnected(const PolicyPeerSession& session);
+  SubnetPeerStatus* findSubnetStatus(const uint8_t* key, bool allocate);
   bool nextPolicyPeerNonce(uint8_t* nonce);
   bool peerPermitted(PolicyPeerSession::Context context, const uint8_t* key) const;
   const char* peerContextName(PolicyPeerSession::Context context) const;

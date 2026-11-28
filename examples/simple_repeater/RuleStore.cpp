@@ -751,6 +751,10 @@ uint32_t RuleStore::checkpointFloor(const Snapshot& snapshot, const uint8_t* ori
   return 0;
 }
 
+bool RuleStore::hasCheckpointFloor(Scope scope, const mesh::Identity& node) const {
+  return _ready && (scope == Global || scope == Region) && checkpointFloor(_state, node.pub_key, scope);
+}
+
 bool RuleStore::makeCheckpoint(Scope scope, const mesh::LocalIdentity& node, Checkpoint& checkpoint,
                                Rule (&records)[Capacity]) const {
   if (!forwardingAllowed() || (scope != Global && scope != Region)

@@ -75,7 +75,7 @@ void MyMesh::receivePeerHandshake(const mesh::Packet& packet) {
   if (!session || session->active() || !session->accept(frame, name, _rules.syncKey(), self_id, millis())) return;
   getTables()->markSeen(&packet);
   if (!challenge) {
-    if (session->active() && session->context() == Context::Subnet) queueSubnetMode();
+    if (session->active()) policyPeerConnected(*session);
     return;
   }
   uint8_t nonce[PolicyPeerSession::NonceSize];
@@ -100,7 +100,7 @@ void MyMesh::servicePolicyPeers() {
     if (!packet) return;
     sendZeroHop(packet);
     session.markHandshakeSent(millis());
-    if (session.active() && session.context() == Context::Subnet) queueSubnetMode();
+    if (session.active()) policyPeerConnected(session);
     _next_policy_tx = futureMillis(PolicyIntervalMs);
     return;
   }
