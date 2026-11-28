@@ -7,10 +7,33 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 from run import RAW_RX, ROLES, Skip, decode_advert, decode_public_text, find_unacknowledged_deny, pin_keys, write_report
-from run import CONTACT_INFO, CONTACT_MESSAGE, CONTACT_MESSAGE_V3, Failure, decode_cli_reply, find_unacknowledged_rule
+from run import CONTACT_INFO, CONTACT_MESSAGE, CONTACT_MESSAGE_V3, Device, Failure, decode_cli_reply, find_unacknowledged_rule
 from run import test_manual_onboarding as run_manual_onboarding, test_remote_acl as run_remote_acl
 from run import test_peer_onboarding as run_peer_onboarding
 from run import pairs, test_shared_rule_recovery as run_shared_rule_recovery
+
+
+class RepeaterPreflightTest(unittest.TestCase):
+    def repeater(self, policy):
+        response = {"get role": "> repeater", "get public.key": "> " + "ab" * 32,
+                    "get radio": "> 869.525, 250, 10, 5", "board": "RAK3401",
+                    "ver": "test", "rules status": policy, "filter": "> 1byte off, data on, public off"}
+        return SimpleNamespace(name="R1", cli=response.__getitem__)
+
+    def test_baseline_exposes_inherited_filters(self):
+        repeater = self.repeater("Unknown command")
+        Device.identify(repeater, baseline=True)
+        self.assertEqual(repeater.details["filters"], {"1byte": "off", "data": "on", "public": "off"})
+        self.assertEqual(repeater.details["radio"], [869525, 250000, 10, 5])
+        with self.assertRaisesRegex(Skip, "Hardened rule store"):
+            Device.identify(repeater)
+
+    def test_hardened_requires_its_own_profile(self):
+        repeater = self.repeater("rev=8 mode=normal")
+        with self.assertRaisesRegex(Skip, "baseline CLI"):
+            Device.identify(repeater, baseline=True)
+        Device.identify(repeater)
+        self.assertEqual(repeater.details["policy"], {"rev": "8", "mode": "normal"})
 
 
 class ManualOnboardingTest(unittest.TestCase):

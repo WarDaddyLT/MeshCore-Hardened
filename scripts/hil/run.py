@@ -236,7 +236,7 @@ class Device:
             return reply
         raise Failure(f"{self.name} did not receive a CLI reply from {repeater.name}.")
 
-    def identify(self):
+    def identify(self, baseline=False):
         if self.name in REPEATERS:
             if self.cli("get role").lstrip("> ") != "repeater":
                 raise Skip(f"{self.name} is not running repeater firmware.")
@@ -246,10 +246,21 @@ class Device:
                 "board": self.cli("board"), "version": self.cli("ver"),
                 "radio": [round(float(radio[0]) * 1000), round(float(radio[1]) * 1000),
                           int(radio[2]), int(radio[3])],
-                "policy": pairs(self.cli("rules status")),
             }
-            if not self.details["policy"].get("rev"):
-                raise Skip(f"{self.name} does not expose the Hardened rule store.")
+            status = self.cli("rules status")
+            if baseline:
+                if status != "Unknown command":
+                    raise Skip(f"{self.name} did not report the SaveMeshcore baseline CLI.")
+            else:
+                policy = pairs(status)
+                if not policy.get("rev"):
+                    raise Skip(f"{self.name} does not expose the Hardened rule store.")
+                self.details["policy"] = policy
+            filters = re.fullmatch(r"1byte (on|off), data (on|off), public (on|off)",
+                                   self.cli("filter").lstrip("> "))
+            if not filters:
+                raise Skip(f"{self.name} did not report the inherited packet filters.")
+            self.details["filters"] = dict(zip(("1byte", "data", "public"), filters.groups()))
         else:
             info = self.request(bytes((DEVICE_QUERY, 3)), DEVICE_INFO)
             state = self.request(bytes((APP_START,)) + bytes(7) + b"Hardened HIL", SELF_INFO)
@@ -817,7 +828,7 @@ def test_shared_rule_recovery(devices, report):
     sample(devices, "ACTOR", "ADMIN", True, report)
 
 
-def preflight(devices, config):
+def preflight(devices, config, baseline=False):
     keys = [devices[role].key for role in ROLES]
     if len(set(keys)) != 4 or keys[0][:2] == keys[1][:2]:
         raise Skip("Public keys must be unique, including both repeater path prefixes.")
@@ -829,6 +840,10 @@ def preflight(devices, config):
             raise Skip(f"{role} radio settings differ from R1.")
     for role in REPEATERS:
         device = devices[role]
+        if json.loads(device.cli("stats-core")).get("queue_len") != 0:
+            raise Skip(f"{role} outbound queue is active. Wait for an isolated, quiet bench.")
+        if baseline:
+            continue
         policy = device.details["policy"]
         if policy.get("mode") not in ("normal", "open"):
             raise Skip(f"{role} must start in Normal.")
@@ -840,8 +855,6 @@ def preflight(devices, config):
             decision = pairs(device.cli(f"rules device client {devices[peer].key}"))
             if decision.get("trust") not in ("allowed", "unknown"):
                 raise Skip(f"{role} already denies {peer} or lacks rules device support.")
-        if json.loads(device.cli("stats-core")).get("queue_len") != 0:
-            raise Skip(f"{role} outbound queue is active. Wait for an isolated, quiet bench.")
 
 
 def pin_keys(path, devices, config):
@@ -939,11 +952,15 @@ def main():
     actions.add_argument("--smoke", action="store_true", help="Run the five-advert deny and cleanup scenario.")
     actions.add_argument("--suite", choices=(*SCENARIOS, *PREPARED_SCENARIOS, "identity"))
     actions.add_argument("--all", action="store_true", help="Run implemented live scenarios and record remaining coverage.")
+    parser.add_argument("--baseline", action="store_true",
+                        help="Use the SaveMeshcore baseline profile for read-only preflight.")
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--report", type=Path, default=Path("out/hil/actor"))
     parser.add_argument("--isolated-rf", action="store_true",
                         help="Confirm legal settings and RF isolation and authorize temporary local bench settings.")
     args = parser.parse_args()
+    if args.baseline and not args.preflight:
+        parser.error("--baseline requires --preflight")
     if args.list:
         for port in ports():
             if port.vid is not None and port.pid is not None:
@@ -952,7 +969,8 @@ def main():
         return 0
 
     report = {"run_id": uuid.uuid4().hex, "started": datetime.now(timezone.utc).isoformat(),
-              "operation": args.suite or ("preflight" if args.preflight else "identify" if args.identify
+              "operation": args.suite or ("baseline-preflight" if args.baseline else "preflight" if args.preflight
+                                          else "identify" if args.identify
                                           else "pin" if args.pin else "all" if args.all else "actor"),
               "devices": {}, "cases": [], "samples": [], "temporary_rules": {}, "cleanup": {}}
     stage = "preflight"
@@ -973,7 +991,7 @@ def main():
             failed_identities = []
             for role, device in devices.items():
                 try:
-                    device.identify()
+                    device.identify(baseline=args.baseline)
                 except (Skip, Failure, ValueError, OSError, serial.SerialException) as err:
                     failed_identities.append(f"{role}: {err}")
                     continue
@@ -995,9 +1013,10 @@ def main():
                 preflight(devices, config)
                 report.update(status="PASS", reason="Four device keys pinned and preflight passed. RF not run.")
             else:
-                preflight(devices, config)
+                preflight(devices, config, baseline=args.baseline)
                 if args.preflight:
-                    report.update(status="PASS", reason="Four-device preflight passed. RF not run.")
+                    profile = "SaveMeshcore baseline" if args.baseline else "Hardened"
+                    report.update(status="PASS", reason=f"Four-device {profile} preflight passed. RF not run.")
                 else:
                     selected = tuple(SCENARIOS) if args.all else (args.suite or "actor",)
                     if any(name not in SCENARIOS and name not in PREPARED_SCENARIOS for name in selected):
