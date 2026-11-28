@@ -277,7 +277,7 @@ class Device:
             ("locked", drops.get("locked", 0)), ("filter", drops.get("filter", 0)))}
 
 
-def sample(devices, sender, observer, expect_forward, report, drop_reason="identity"):
+def sample(devices, sender, observer, expect_forward, report, drop_reason="identity", held_repeater=None):
     before = {role: devices[role].stats() for role in REPEATERS}
     rx, tx = devices[observer], devices[sender]
     rx.usb.reset_input_buffer()
@@ -299,12 +299,17 @@ def sample(devices, sender, observer, expect_forward, report, drop_reason="ident
                      for key in before[role]} for role in REPEATERS}
     report["samples"].append({"sender": sender, "observer": observer,
                               "expect_forward": expect_forward, "adverts": adverts, "deltas": deltas})
+    if held_repeater:
+        report["samples"][-1]["held_repeater"] = held_repeater
     if len(adverts) != 1:
         raise Failure(f"{observer} did not capture exactly one signed advert from {sender}.")
     advert = next(iter(adverts.values()))
     for role in REPEATERS:
         hop = any(path[-1] == devices[role].key[:len(path[-1])] for path in advert["paths"])
-        if expect_forward:
+        if role == held_repeater:
+            if not advert["direct"] or hop or deltas[role]["flood_tx"] or not deltas[role]["flood_rx"]:
+                raise Failure(f"Could not prove that {role} held the received {sender} advert.")
+        elif expect_forward:
             if not hop or deltas[role]["flood_tx"] == 0:
                 raise Failure(f"No matching path and TX count proved {role} forwarded {sender}.")
         elif (not advert["direct"] or hop or deltas[role]["flood_tx"]
@@ -614,6 +619,49 @@ def test_sync(devices, report):
             raise Failure("Restore signed Normal policy on R1 and confirm its application on R2.") from None
 
 
+def test_manual_onboarding(devices, report):
+    origin, joining = devices["R1"], devices["R2"]
+    ready = pairs(origin.cli("rules onboarding"))
+    pending = pairs(joining.cli("rules onboarding"))
+    subnet = pending.get("subnet")
+    if not subnet or subnet == "none" or ready.get("subnet") != subnet:
+        raise Skip("R1 and R2 need the same configured test subnet.")
+    if ready.get("onboarding") != "active" or ready.get("transit") != "available":
+        raise Skip("R1 must already have active transit as the forwarding control.")
+    if pending != {"subnet": subnet, "onboarding": "pending", "source": "manual", "transit": "held"}:
+        raise Skip("Set up R2 for manual onboarding over USB before running this suite.")
+
+    sample(devices, "ADMIN", "ACTOR", True, report, held_repeater="R2")
+    before = pairs(joining.cli("rules status"))
+    review = pairs(joining.cli("rules onboarding review"))
+    token = review.get("review", "")
+    if (review.get("subnet") != subnet or review.get("mode") != "normal" or review.get("repeat") != "on"
+            or not re.fullmatch(r"[01]/[01]/[01]", review.get("filters", ""))
+            or not re.fullmatch(r"[0-9a-f]{10}", token)
+            or int(token[:8], 16) != int(before["rev"])):
+        raise Failure("R2 did not return a complete Normal policy review for its current revision.")
+    if pairs(joining.cli("rules onboarding")) != pending:
+        raise Failure("R2 changed its forwarding hold before committing the review.")
+
+    report["cleanup"]["R2 onboarding"] = "commit unconfirmed; inspect rules onboarding"
+    reply = joining.cli(f"rules onboarding commit {token}")
+    after = pairs(joining.cli("rules onboarding"))
+    active = {"subnet": subnet, "onboarding": "active", "source": "manual", "transit": "available"}
+    if after != active:
+        raise Failure("R2 did not activate the reviewed policy and release its forwarding hold.")
+    report["cleanup"]["R2 onboarding"] = "activated as intended"
+    committed = pairs(reply)
+    if not reply.startswith("OK - committed ") or committed.get("transit") != "available":
+        raise Failure("R2 became active without acknowledging the reviewed commit.")
+    expected_revision = str(int(before["rev"]) + 1)
+    if committed.get("rev") != expected_revision or pairs(joining.cli("rules status")).get("rev") != expected_revision:
+        raise Failure("R2 did not advance the acknowledged policy revision exactly once.")
+    report["samples"].append({"type": "manual onboarding commit", "repeater": "R2",
+                              "revision_before": before["rev"], "revision_after": committed["rev"],
+                              "mode": review["mode"], "filters": review["filters"]})
+    sample(devices, "ADMIN", "ACTOR", True, report)
+
+
 def test_shared_rule_recovery(devices, report):
     origin, peer = devices["R1"], devices["R2"]
     actor = devices["ACTOR"].key
@@ -783,14 +831,19 @@ SCENARIOS = {
     "shared": (test_shared_rule_recovery, "Signed shared rule, outage retention, and deletion convergence verified."),
 }
 
-REMAINING = ("remaining ACL cases", "complete filter regression", "physical partition and onboarding",
+PREPARED_SCENARIOS = {
+    "onboarding-manual": (test_manual_onboarding, "Manual policy review, commit, and forwarding verified."),
+}
+
+REMAINING = ("remaining ACL cases", "complete filter regression", "physical partition",
+             "manual onboarding (separate setup)", "peer onboarding",
              "stock Android and room identity", "signed neighbour notices", "baseline comparison")
 
 
 def run_scenarios(devices, report, selected):
     for name in selected:
         result = {"name": name, "samples": [], "temporary_rules": {}, "cleanup": {}}
-        callback, passed = SCENARIOS[name]
+        callback, passed = (SCENARIOS | PREPARED_SCENARIOS)[name]
         try:
             callback(devices, result)
             result.update(status="PASS", reason=passed)
@@ -814,7 +867,7 @@ def main():
     actions.add_argument("--pin", action="store_true", help="Pin verified USB identities in the private config.")
     actions.add_argument("--preflight", action="store_true", help="Check bench prerequisites without transmitting.")
     actions.add_argument("--smoke", action="store_true", help="Run the five-advert deny and cleanup scenario.")
-    actions.add_argument("--suite", choices=(*SCENARIOS, "identity"))
+    actions.add_argument("--suite", choices=(*SCENARIOS, *PREPARED_SCENARIOS, "identity"))
     actions.add_argument("--all", action="store_true", help="Run implemented live scenarios and record remaining coverage.")
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--report", type=Path, default=Path("out/hil/actor"))
@@ -877,7 +930,7 @@ def main():
                     report.update(status="PASS", reason="Four-device preflight passed. RF not run.")
                 else:
                     selected = tuple(SCENARIOS) if args.all else (args.suite or "actor",)
-                    if any(name not in SCENARIOS for name in selected):
+                    if any(name not in SCENARIOS and name not in PREPARED_SCENARIOS for name in selected):
                         raise Skip(f"The {args.suite} suite is not implemented in this runner.")
                     if not args.isolated_rf:
                         raise Skip("RF trials require --isolated-rf for the shielded or attenuated bench.")
