@@ -1087,6 +1087,7 @@ def main():
                                           else "identify" if args.identify
                                           else "pin" if args.pin else "all" if args.all else "actor"),
               "repeater_profile": "savemeshcore" if args.baseline else "hardened",
+              "isolated_rf": False,
               "devices": {}, "cases": [], "samples": [], "temporary_rules": {}, "cleanup": {}}
     stage = "preflight"
     try:
@@ -1139,6 +1140,7 @@ def main():
                     if args.baseline_report and not isinstance(baseline, dict):
                         raise Skip("The SaveMeshcore quiet report must be a JSON object.")
                     stage = "RF"
+                    report["isolated_rf"] = True
                     run_quiet(devices, report, baseline)
                     report.update(status="PASS", reason="Quiet stock-client delivery measurement recorded.")
                 else:
@@ -1148,6 +1150,7 @@ def main():
                     if not args.isolated_rf:
                         raise Skip("RF trials require --isolated-rf for the shielded or attenuated bench.")
                     stage = "RF"
+                    report["isolated_rf"] = True
                     try:
                         run_scenarios(devices, report, selected)
                         status = "PASS"

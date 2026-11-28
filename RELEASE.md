@@ -1,5 +1,21 @@
 # Release repeater firmware
 
+## First Alpha candidate
+
+The [Alpha release issue](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/29) records the required physical validation. Before creating a GitHub Alpha release, record the firmware Git commit and SHA-256 of both installed repeater images in the local bench configuration, complete the four-device validation, and link the passing evidence from the issue.
+
+Prepare the local bundle from the saved RAK 1W application DFU ZIP and ThinkNode M5 application BIN for the verified candidate.
+
+```sh
+python3 scripts/package_alpha_candidate.py \
+  --actor-report out/hil/actor.json --commit "$FIRMWARE_COMMIT" \
+  --r1-zip /path/to/tested/RAK_3401_repeater.zip \
+  --r2-bin /path/to/tested/ThinkNode_M5_Repeater.bin \
+  --output out/repeaters/alpha-candidate
+```
+
+Use the standalone `--suite actor` report from the isolated bench. The output contains both images, `SHA256SUMS.txt`, and an evidence manifest linking the exact images to the test run. Keep the original report with the release evidence. The GitHub release gate also requires the remaining acceptance results in the release issue. The local command produces no GitHub draft or tag.
+
 ## GitHub release
 
 Push a release tag such as `repeater-v1.18.0-hardened` or `repeater-v1.18.0-hardened.1` from a commit that contains the release workflow. For an existing tag, run **MeshCore Hardened repeater release** from the Actions tab and enter the tag.
