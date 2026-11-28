@@ -28,6 +28,14 @@ Build and flash development firmware as each feature lands. Formal native and fo
 | RAK3401 development flash | VERIFIED | USB DFU completed. The repeater returned in application mode and responded to `rules status` with revision 0, open mode, and capacity for 24 records. |
 | Formal validation and release | TODO | Validate native behavior, the four-device RF matrix, and stock Android interoperability in the formal validation phase. |
 
+Run the host regression suite from the repository root.
+
+```sh
+pio test -e native -e native_kiss_modem -e native_savemesh -e native_savemesh_prefs -e native_hardened
+```
+
+The five native environments passed 83 tests on the alpha development branch. The hardened suite exercises the production rule store, peer session, receive checks, probation ledger, and airtime budgets with real Ed25519 and SHA-256 and a fault-injecting filesystem. Physical LoRa and Android behavior remain separate release checks.
+
 The firmware CLI and the development limits are documented in the [repeater CLI guide](hardened-repeater-cli.md).
 
 ### Blacklist RF bench

@@ -1,13 +1,12 @@
 #pragma once
 
-// In-memory filesystem for the SaveMeshcore preference tests. Only the
-// native_savemesh_prefs environment puts this directory on its include path,
-// so it replaces helpers/IdentityStore.h (and its FILESYSTEM type) for that
-// build alone.
+// In-memory filesystem for native preference and managed-policy tests.
 
 #include <Arduino.h>
+#include <Identity.h>
 #include <map>
 #include <string>
+#include <utility>
 
 struct MockFile : public Stream {
   std::string* data = nullptr;
@@ -15,8 +14,10 @@ struct MockFile : public Stream {
   bool* fail_writes = nullptr;
 
   explicit operator bool() const { return data != nullptr; }
+  size_t size() const { return data ? data->size() : 0; }
   int available() override { return data ? (int)(data->size() - pos) : 0; }
   int read() override { return (data && pos < data->size()) ? (unsigned char)(*data)[pos++] : -1; }
+  size_t read(uint8_t* buffer, size_t length) { return readBytes(buffer, length); }
   int peek() override { return (data && pos < data->size()) ? (unsigned char)(*data)[pos] : -1; }
   size_t write(uint8_t b) override {
     if (!data || (fail_writes && *fail_writes)) return 0;
@@ -29,12 +30,14 @@ struct MockFile : public Stream {
   size_t print(long v, int r = DEC) override { return Print::print(std::to_string(v).c_str()); }
   size_t print(unsigned long v, int r = DEC) override { return Print::print(std::to_string(v).c_str()); }
   using Print::print;
+  using Print::write;
   void close() {}
 };
 
 struct MockFS {
   std::map<std::string, std::string> files;
   bool fail_writes = false;   // simulates a full or failing filesystem
+  bool fail_rename = false;
 
   bool exists(const char* name) { return files.count(name) > 0; }
   MockFile open(const char* name) {
@@ -51,6 +54,13 @@ struct MockFS {
     return f;
   }
   bool remove(const char* name) { return files.erase(name) > 0; }
+  bool rename(const char* from, const char* to) {
+    if (fail_rename || !exists(from) || exists(to)) return false;
+    files[to] = std::move(files.at(from));
+    files.erase(from);
+    return true;
+  }
 };
 
+using File = MockFile;
 #define FILESYSTEM MockFS
