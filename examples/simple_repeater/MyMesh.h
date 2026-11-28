@@ -150,12 +150,15 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t _checkpoint_sender[PUB_KEY_SIZE]{};
   uint8_t _checkpoint_target[PUB_KEY_SIZE]{};
   unsigned long _checkpoint_expiry = 0;
-  PolicyPeerSession _policy_peers[8];
+  static constexpr size_t PolicyPeerCapacity = 8;
+  PolicyPeerSession _policy_peers[PolicyPeerCapacity];
+  size_t _subnet_mode_cursor = PolicyPeerCapacity;
   uint32_t _peer_epoch = 0;
   uint32_t _peer_nonce_counter = 0;
   unsigned long _next_peer_epoch_attempt = 0;
   unsigned long _next_policy_tx = 0;
   unsigned long _next_policy_commit = 0;
+#ifndef HARDENED_NO_ADMIN_ROOM
   mesh::LocalIdentity _room_identity;
   bool _room_identity_loaded = false;
   struct RoomSession {
@@ -171,6 +174,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t _admin_advert[MAX_TRANS_UNIT]{};
   uint8_t _admin_advert_length = 0;
   unsigned long _admin_advert_expires = 0;
+#endif
   RepeaterACL acl;
   CommonCLI _cli;
   uint8_t reply_data[MAX_PACKET_PAYLOAD];
@@ -222,8 +226,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void receivePeerHandshake(const mesh::Packet& packet);
   void servicePolicyPeers();
   void clearOutboundQueue();
+  static bool isSubnetModePacket(const mesh::Packet& packet);
+  void receiveSubnetMode(mesh::Packet& packet);
+  void sendSubnetMode();
+  void queueSubnetMode() { _subnet_mode_cursor = 0; }
   bool nextPolicyPeerNonce(uint8_t* nonce);
-  bool peerPermitted(const uint8_t* key) const;
+  bool peerPermitted(PolicyPeerSession::Context context, const uint8_t* key) const;
   const char* peerContextName(PolicyPeerSession::Context context) const;
   PolicyPeerSession* findPolicyPeer(PolicyPeerSession::Context context, const uint8_t* key, bool allocate);
   void queuePolicySync() { _sync_cursor = 0; _sync_peer_cursor = 0; }
@@ -243,6 +251,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void handleCheckpointCommand(const char* args, char* reply, bool canWrite);
   void receiveCheckpointPacket(mesh::Packet& packet);
   void sendCheckpointPacket();
+#ifndef HARDENED_NO_ADMIN_ROOM
   bool receiveAdminRoom(mesh::Packet* packet);
   bool handleAdminRoomCommand(const char* command, char* reply, bool usb);
   bool prepareAdminRoomIdentity();
@@ -250,6 +259,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   mesh::Packet* createAdminRoomAdvert();
   void sendAdminRoomPacket(mesh::Packet* request, mesh::Packet* response,
                            const RoomSession& session, unsigned long delay);
+#endif
   bool handleProtectedPrefsCommand(uint32_t sender_timestamp, char* command, char* reply);
   void handleFilterCommand(const char* name, const char* arg, uint8_t& setting, char* reply);
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);

@@ -248,6 +248,10 @@ Use `neighbours status` for `channel`, `observed`, and `pending`. Use `neighbour
 
 A repeater assigned to a managed subnet with `rules subnet <name>` holds transit while it is onboarding. Check `rules onboarding` for its state. USB administration and authenticated policy exchange stay available. Verified onboarding commit is tracked separately. [Onboarding commit](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/24)
 
+To share a mode, configure the same subnet name on its member repeaters and grant the publishing repeater's full key with `rules publisher grant subnet <key>` on the publisher and receivers. Establish sessions with `rules peer connect subnet <peer-key>`. An administrator on the publisher can run `rules subnet mode normal`, `rules subnet mode protected`, or `rules subnet mode locked`. Receivers check the authenticated peer, the publisher's scope and signature, and the revision before committing the mode. Other subnets keep their own modes. The repeater applies the stricter of its local and committed subnet modes.
+
+`rules subnet mode` shows the subnet mode and revision, the local mode, and the effective mode. A reconnect queues the last committed update for authenticated subnet peers. An administrator can also use `rules subnet sync` to resend it. Policy propagation stays within the existing packet and airtime limits. [Shared policy commands](docs/hardened-repeater-cli.md#shared-policy)
+
 Policy sync is opt-in. For repeaters A and B, read each primary public key with `get public.key`. Generate a dedicated 16-byte sync key and provision it on both devices over USB. Give both devices the same domain name.
 
 On A:
@@ -323,6 +327,8 @@ Use `rules checkpoint global` or `rules checkpoint region` on the originating re
 ## Optional administration room
 
 The room defaults off. Enable it only when you are ready to check the experimental room workflow. Android contact import, login, and reply display are still pending validation. The primary identity continues handling normal repeater forwarding and management.
+
+The compact LoRa-E5 Mini repeater build omits the optional room. The primary repeater CLI remains available.
 
 | Command | Effect |
 | --- | --- |

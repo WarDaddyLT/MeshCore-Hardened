@@ -21,10 +21,11 @@ const char* MyMesh::peerContextName(Context context) const {
   return "";
 }
 
-bool MyMesh::peerPermitted(const uint8_t* key) const {
+bool MyMesh::peerPermitted(Context context, const uint8_t* key) const {
   if (!_rules.trustedPeer(key)) return false;
   const auto decision = _rules.decide(RuleStore::Repeater, key);
-  return decision != RuleStore::Denied && (_rules.mode() != RuleStore::Locked || decision == RuleStore::Allowed);
+  return decision != RuleStore::Denied && (context == Context::Subnet
+      || _rules.mode() != RuleStore::Locked || decision == RuleStore::Allowed);
 }
 
 bool MyMesh::nextPolicyPeerNonce(uint8_t* nonce) {
@@ -67,13 +68,16 @@ void MyMesh::receivePeerHandshake(const mesh::Packet& packet) {
   PolicyPeerSession::Frame frame;
   memcpy(&frame, packet.payload, sizeof(frame));
   const auto* name = peerContextName(frame.context);
-  if (!*name || !self_id.matches(frame.target) || !peerPermitted(frame.source)
+  if (!*name || !self_id.matches(frame.target) || !peerPermitted(frame.context, frame.source)
       || !_sync_work.admit(millis()) || getTables()->wasSeen(&packet)) return;
   const bool challenge = frame.type == PolicyPeerSession::Type::Challenge;
   auto* session = findPolicyPeer(frame.context, frame.source, challenge);
   if (!session || session->active() || !session->accept(frame, name, _rules.syncKey(), self_id, millis())) return;
   getTables()->markSeen(&packet);
-  if (!challenge) return;
+  if (!challenge) {
+    if (session->active() && session->context() == Context::Subnet) queueSubnetMode();
+    return;
+  }
   uint8_t nonce[PolicyPeerSession::NonceSize];
   if (nextPolicyPeerNonce(nonce)) session->setResponseNonce(nonce);
   else session->reset();
@@ -84,7 +88,7 @@ void MyMesh::servicePolicyPeers() {
     if (session.free()) continue;
     session.expire(millis());
     if (session.free()) continue;
-    if (!peerPermitted(session.peer()) || !*peerContextName(session.context())) session.reset();
+    if (!peerPermitted(session.context(), session.peer()) || !*peerContextName(session.context())) session.reset();
   }
   if (!_rules.forwardingAllowed() || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)
       || _mgr->getOutboundTotal() || (_next_policy_tx && !millisHasNowPassed(_next_policy_tx))) return;
@@ -96,6 +100,7 @@ void MyMesh::servicePolicyPeers() {
     if (!packet) return;
     sendZeroHop(packet);
     session.markHandshakeSent(millis());
+    if (session.active() && session.context() == Context::Subnet) queueSubnetMode();
     _next_policy_tx = futureMillis(PolicyIntervalMs);
     return;
   }
@@ -118,7 +123,7 @@ bool MyMesh::handlePeerCommand(const char* command, char* reply, bool canWrite) 
 
   uint8_t key[PUB_KEY_SIZE];
   if (!savemesh::isHex(args, 2 * sizeof(key)) || !mesh::Utils::fromHex(key, sizeof(key), args)
-      || !peerPermitted(key)) {
+      || !peerPermitted(context, key)) {
     strcpy(reply, "Err - expected an eligible full trusted peer key");
     return true;
   }
@@ -159,7 +164,7 @@ PolicyPeerSession* MyMesh::openPolicyFrame(const mesh::Packet& packet, PolicyPee
   for (auto& session : _policy_peers) {
     session.expire(millis());
     if (!session.active() || session.context() != context || !session.canReceiveSequence(sequence)
-        || !peerPermitted(session.peer())) continue;
+        || !peerPermitted(context, session.peer())) continue;
     GCM<AES128> cipher;
     if (!cipher.setKey(session.receiveKey(), CIPHER_KEY_SIZE) || !cipher.setIV(packet.payload + 1, PolicyNonceSize)) continue;
     cipher.addAuthData(packet.payload, 1);
