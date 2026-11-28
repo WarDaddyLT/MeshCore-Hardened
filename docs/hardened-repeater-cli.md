@@ -184,7 +184,7 @@ When a domain session reconnects, shared rules and retained deletions are queued
 
 ### Manual onboarding
 
-1. Assign a subnet with `rules subnet <name>` over USB. For an existing member use `rules onboarding start`. Confirm `onboarding=pending transit=held`.
+1. Assign a subnet with `rules subnet <name>` over USB. For an existing member use `rules onboarding start`. Confirm that onboarding is pending and transit is held.
 2. Enter the intended starting policy with the normal authorized rule, mode, filter, and traffic commands. Use `rules list`, `rules status`, `rules traffic`, and `filter` to inspect it. Rules are local unless an authorized publisher explicitly gives them a shared scope.
 3. Run `rules onboarding review` over USB or authenticated admin CLI. Check the effective mode, the base filters in 1-byte/data/Public order, and the saved repeat setting. Copy the displayed review token.
 4. Run `rules onboarding commit <review>`. Forwarding becomes available only after the reviewed policy revision and its activation are committed to flash. A changed policy, reboot before commit, or failed write requires another review or retry while forwarding remains held. A saved `repeat off` still holds ordinary transit.
@@ -197,6 +197,8 @@ Manual onboarding works without an available peer. It preserves accepted shared 
 2. Connect the joining repeater to the provider with `rules peer connect subnet <provider-key>`. Wait for both devices to report an authenticated session. The provider must have completed its own onboarding.
 3. Run `rules onboarding peer fetch <provider-key>` on the joining repeater. Check `rules onboarding peer` for progress. Every block counts against the existing policy airtime budget. A full transfer can take more than half an hour.
 4. Wait for `peer=staged`. Inspect the policy and use the same review and commit commands as manual onboarding. Receiving a snapshot leaves transit held.
+
+`rules onboarding` reports whether the policy source is manual or peer-supplied. A staged peer policy and the forwarding hold survive reboot. Review again after reboot. Activation verifies that the provider still has peer trust and each scope grant used for the snapshot's deletion state. If that authority has been withdrawn, forwarding stays held. An operator may start manual onboarding again over USB and explicitly review the resulting policy.
 
 The requested snapshot binds the signature to the requesting repeater, a fresh request, and the configured scopes. It contains the signed subnet mode, shared rules and deletion state. Local settings stay on the source. The joining repeater verifies original signatures and scope grants and keeps its own policy and newer accepted state. The provider stops a transfer if the shared contents change. A missing block, disconnected session, or reboot before staging leaves the receiving policy held. Use `rules onboarding peer cancel` to clear the current transfer before retrying. The compact LoRa-E5 Mini build supports manual onboarding.
 

@@ -9,7 +9,7 @@ constexpr const char* Pending = "/hardened_rules_tmp";
 constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
 constexpr const char* Provisioned = "/hardened_rules_provisioned";
 constexpr const char* ForwardingHold = "/hardened_rules_hold";
-constexpr uint8_t Magic[] = {'M', 'C', 'H', 14};
+constexpr uint8_t Magic[] = {'M', 'C', 'H', 15};
 constexpr uint16_t MaxFreezeMinutes = 7 * 24 * 60;
 constexpr uint16_t DefaultFreezeMinutes = 60;
 constexpr uint32_t FreezeCheckpointSeconds = 15 * 60;
@@ -285,7 +285,7 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
                                  offsetof(Snapshot, probation), offsetof(Snapshot, freeze_seconds),
                                  offsetof(Snapshot, floors), offsetof(Snapshot, subnet),
                                  offsetof(Snapshot, onboarding), offsetof(Snapshot, subnet_mode),
-                                 offsetof(Snapshot, import_provider)};
+                                 offsetof(Snapshot, import_provider), offsetof(Snapshot, import_scopes)};
   uint8_t version = 5;
   for (const size_t prefix : prefixes) {
     if (size == prefix + sizeof(legacyDigest)) break;
@@ -324,8 +324,16 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
   }
   if (version < 12) snapshot.onboarding = snapshot.subnet[0] != 0;
   if (version < 13) snapshot.subnet_mode = {};
-  memset(snapshot.import_provider, 0, sizeof(snapshot.import_provider));
-  memset(snapshot.import_revision, 0, sizeof(snapshot.import_revision));
+  if (version < 14) {
+    memset(snapshot.import_provider, 0, sizeof(snapshot.import_provider));
+    memset(snapshot.import_revision, 0, sizeof(snapshot.import_revision));
+  }
+  snapshot.import_scopes = 0;
+  if (decodeRevision(snapshot.import_revision)) {
+    snapshot.import_scopes = scopePermission(Subnet);
+    if (snapshot.domain[0]) snapshot.import_scopes |= scopePermission(Global);
+    if (snapshot.domain[0] && snapshot.region[0]) snapshot.import_scopes |= scopePermission(Region);
+  }
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, offsetof(Snapshot, digest));
   return true;
 }
@@ -347,6 +355,11 @@ bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
   if (memcmp(digest, snapshot.digest, sizeof(digest)) != 0) return false;
   if (bool(decodeRevision(snapshot.import_revision)) == mesh::Utils::isZeroes(snapshot.import_provider, PUB_KEY_SIZE)
       || (decodeRevision(snapshot.import_revision) && !snapshot.subnet[0])) return false;
+  if (snapshot.import_scopes && (!decodeRevision(snapshot.import_revision)
+      || !(snapshot.import_scopes & scopePermission(Subnet))
+      || (snapshot.import_scopes & ~(scopePermission(Subnet) | scopePermission(Global) | scopePermission(Region))))) {
+    return false;
+  }
 
   if (subnetRevision(snapshot.subnet_mode)) {
     if (!verifiedSubnetMode(snapshot.subnet, snapshot.subnet_mode)) return false;
@@ -500,6 +513,7 @@ void RuleStore::handleRecoveryCommand(const char* command, char* reply) {
 
     _candidate = empty ? Snapshot{} : _state;
     _candidate.onboarding = _candidate.subnet[0] != 0;
+    _candidate.import_scopes = 0;
     // Recovered revisions can precede peer sessions established before the failure.
     memset(_candidate.sync_key, 0, sizeof(_candidate.sync_key));
     memcpy(_candidate.magic, Magic, sizeof(Magic));
@@ -621,7 +635,10 @@ bool RuleStore::setScope(Scope scope, const char* name) {
   char* field = scope == Global ? _candidate.domain : scope == Region ? _candidate.region : _candidate.subnet;
   memset(field, 0, ScopeNameSize);
   memcpy(field, name, length);
-  if (scope == Subnet) _candidate.onboarding = 1;
+  if (scope == Subnet) {
+    _candidate.onboarding = 1;
+    _candidate.import_scopes = 0;
+  }
   encodeRevision(_candidate.revision, decodeRevision(_state.revision) + 1);
   return commit();
 }
@@ -629,9 +646,10 @@ bool RuleStore::setScope(Scope scope, const char* name) {
 bool RuleStore::startOnboarding() {
   const uint32_t revision = decodeRevision(_state.revision);
   if (!_ready || !_state.subnet[0] || revision == UINT32_MAX) return false;
-  if (onboarding()) return true;
+  if (onboarding() && !peerPolicyStaged()) return true;
   _candidate = _state;
   _candidate.onboarding = 1;
+  _candidate.import_scopes = 0;
   encodeRevision(_candidate.revision, revision + 1);
   return commit();
 }
@@ -640,13 +658,25 @@ uint32_t RuleStore::revision() const {
   return decodeRevision(_state.revision);
 }
 
-bool RuleStore::commitOnboarding(uint32_t reviewedRevision) {
-  if (!forwardingAllowed() || !onboarding() || !_state.subnet[0]
+bool RuleStore::commitOnboarding(uint32_t reviewedRevision, const mesh::Identity& node) {
+  if (!onboardingPolicyReady(node) || !_state.subnet[0]
       || reviewedRevision != revision() || reviewedRevision == UINT32_MAX) return false;
   _candidate = _state;
   _candidate.onboarding = 0;
   encodeRevision(_candidate.revision, reviewedRevision + 1);
   return commit();
+}
+
+bool RuleStore::onboardingPolicyReady(const mesh::Identity& node) const {
+  if (!forwardingAllowed() || !onboarding()) return false;
+  if (!peerPolicyStaged()) return true;
+  const auto* provider = _state.import_provider;
+  if (!trustedPeer(provider) || decide(Repeater, provider) == Denied) return false;
+  constexpr Scope scopes[] = {Subnet, Global, Region};
+  for (const auto scope : scopes) {
+    if ((_state.import_scopes & scopePermission(scope)) && !publisherAllowed(scope, provider, node)) return false;
+  }
+  return !subnetModeRevision() || publisherAllowed(Subnet, _state.subnet_mode.origin, node);
 }
 
 RuleStore::Authority* RuleStore::authorityFor(Snapshot& snapshot, const uint8_t* key) {
@@ -850,6 +880,7 @@ bool RuleStore::stagePeerPolicy(const PeerPolicy& policy, const PeerPolicyProof&
   if (memcmp(digest, proof.digest, sizeof(digest))) return false;
 
   _candidate = _state;
+  _candidate.import_scopes = scopePermission(Subnet);
   const uint64_t incomingMode = subnetRevision(policy.mode);
   if (incomingMode) {
     const uint64_t current = subnetModeRevision();
@@ -878,6 +909,7 @@ bool RuleStore::stagePeerPolicy(const PeerPolicy& policy, const PeerPolicyProof&
     for (const auto scope : scopes) {
       const uint32_t incoming = decodeRevision(floor.forScope(scope));
       if (incoming && !publisherAllowed(scope, provider, node)) return false;
+      if (incoming) _candidate.import_scopes |= scopePermission(scope);
       if (incoming > decodeRevision(target->forScope(scope))) encodeRevision(target->forScope(scope), incoming);
     }
   }

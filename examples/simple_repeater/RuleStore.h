@@ -91,7 +91,9 @@ public:
   bool transitAllowed() const { return forwardingAllowed() && !onboarding(); }
   bool startOnboarding();
   uint32_t revision() const;
-  bool commitOnboarding(uint32_t reviewedRevision);
+  bool commitOnboarding(uint32_t reviewedRevision, const mesh::Identity& node);
+  bool peerPolicyStaged() const { return _state.import_scopes != 0; }
+  bool onboardingPolicyReady(const mesh::Identity& node) const;
   void handleRecoveryCommand(const char* command, char* reply);
   Mode mode() const;
   const SubnetModeRecord& subnetModeRecord() const { return _state.subnet_mode; }
@@ -181,6 +183,7 @@ private:
     SubnetModeRecord subnet_mode;
     uint8_t import_provider[PUB_KEY_SIZE];
     uint8_t import_revision[4];
+    uint8_t import_scopes;
     uint8_t digest[32];
   };
 

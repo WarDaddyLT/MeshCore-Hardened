@@ -32,8 +32,8 @@ bool MyMesh::handlePeerOnboardingCommand(const char* command, char* reply) {
   const char* args;
   if (!savemesh::matchCommand(command, "peer", &args)) return false;
   if (!*args) {
-    const char* state = peerOnboardingBusy() ? "pending" : _peer_onboarding == PeerOnboardingState::Staged ? "staged"
-                     : _peer_onboarding == PeerOnboardingState::Failed ? "failed" : "idle";
+    const char* state = peerOnboardingBusy() ? "pending" : _peer_onboarding == PeerOnboardingState::Failed ? "failed"
+                     : _rules.onboarding() && _rules.peerPolicyStaged() ? "staged" : "idle";
     snprintf(reply, 150, "peer=%s received=%lu transit=%s", state, static_cast<unsigned long>(_onboarding_offset),
              _rules.transitAllowed() && !_prefs.disable_fwd ? "available" : "held");
     return true;
