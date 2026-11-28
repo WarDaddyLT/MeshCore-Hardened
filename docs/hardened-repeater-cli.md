@@ -149,6 +149,8 @@ rules sync.key off
 rules trust <64-hex-repeater-public-key>
 rules untrust <64-hex-repeater-public-key>
 rules subnet [name]
+rules onboarding
+rules onboarding start
 rules authority <64-hex-public-key>
 rules publisher grant|retire global|region|subnet <64-hex-public-key>
 rules relay allow|remove <64-hex-repeater-public-key>
@@ -164,6 +166,8 @@ Configure the domain, sync key, and authorized origins over USB on each particip
 Shared updates are signed with the originating repeater key after it authorizes the change. Each receiving repeater checks the scope grant and verifies the origin signature independently. Sync messages are encrypted with AES-128-GCM and carry one update per packet. Local rules stay on their repeater. A write queues shared updates, and `rules sync` resends active rules and deletion records after a partition. Senders queue at most one update per minute. For a multi-hop reconciliation, run sync on intermediate repeaters that already hold the current state.
 
 `rules subnet <name>` assigns this repeater to one named managed subnet, independently of its MeshCore region. `rules authority <key>` reports peer, relay, and publisher settings. For shared global and regional rules, use a `domain` session. A `subnet` session authenticates peers in the configured subnet. Mode propagation follows separately. [Subnet mode propagation](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/20)
+
+Assigning a new subnet name holds RF and bridge forwarding in the same durable write. Upgrading a repeater with an existing subnet also requires onboarding. `rules onboarding` reports the selected subnet, onboarding state, and transit availability. `rules onboarding start` is a USB-only command that puts a configured repeater back into onboarding. USB management and authenticated policy exchange stay available during onboarding. `rules resume` controls the separate storage recovery hold. Managed transit stays held until a verified policy commit. [Onboarding commit](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/24)
 
 On both repeaters, set the same dedicated random sync key and trust the other's full public key. In Locked, the peer also needs a repeater allow rule. Use `rules peer connect` on one end and wait for `rules peer status` to show `peer=authenticated` at both ends. The handshake uses three signed proofs, reserves a durable freshness epoch on first use after boot, and expires pending state after four minutes. Active sessions expire after one hour. If the last proof is lost, disconnect on both ends before reconnecting. A repeater holds up to eight sessions. After restoring a policy snapshot with USB recovery, provision a fresh dedicated sync key on participating nodes before reconnecting.
 

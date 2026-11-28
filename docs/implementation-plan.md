@@ -18,6 +18,7 @@ Build and flash development firmware as each feature lands. Formal native and fo
 | Policy synchronization | VERIFIED (build) | Signed, encrypted global and regional updates between provisioned repeaters, including deletion records and explicit reconciliation. |
 | Scoped publishing authority and subnet membership | IN PROGRESS (RF validation pending) | Independent named subnet settings and scoped publisher grants. Durable USB retirement removes accepted rules for a compromised origin in that scope. |
 | Authenticated policy peers | IN PROGRESS (RF validation pending) | Fresh signed proofs establish directional session keys. Accepted policy requires both an authenticated peer and the original authorized publisher's signature. |
+| Managed onboarding hold | IN PROGRESS (RF validation pending) | New subnet assignments durably hold radio and bridge transit. Local administration and authenticated setup remain available. A verified initial policy commit is required to release the hold. |
 | Optional room identity | VERIFIED (build) | Separate persistent room identity, signed contact export, and a read-only room adapter. It defaults off pending stock Android validation. |
 | RAK3401 development flash | VERIFIED | USB DFU completed. The repeater returned in application mode and responded to `rules status` with revision 0, open mode, and capacity for 24 records. |
 | Formal validation and release | TODO | Validate native behavior, the four-device RF matrix, and stock Android interoperability in the formal validation phase. |

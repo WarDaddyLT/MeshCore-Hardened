@@ -246,6 +246,8 @@ Use `neighbours status` for `channel`, `observed`, and `pending`. Use `neighbour
 
 ## Share signed rules between repeaters
 
+A repeater assigned to a managed subnet with `rules subnet <name>` holds transit while it is onboarding. Check `rules onboarding` for its state. USB administration and authenticated policy exchange stay available. Verified onboarding commit is tracked separately. [Onboarding commit](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/24)
+
 Policy sync is opt-in. For repeaters A and B, read each primary public key with `get public.key`. Generate a dedicated 16-byte sync key and provision it on both devices over USB. Give both devices the same domain name.
 
 On A:

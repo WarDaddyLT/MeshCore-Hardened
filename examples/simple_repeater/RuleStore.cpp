@@ -9,7 +9,7 @@ constexpr const char* Pending = "/hardened_rules_tmp";
 constexpr const char* PendingSeal = "/hardened_rules_rev_tmp";
 constexpr const char* Provisioned = "/hardened_rules_provisioned";
 constexpr const char* ForwardingHold = "/hardened_rules_hold";
-constexpr uint8_t Magic[] = {'M', 'C', 'H', 11};
+constexpr uint8_t Magic[] = {'M', 'C', 'H', 12};
 constexpr uint16_t MaxFreezeMinutes = 7 * 24 * 60;
 constexpr uint16_t DefaultFreezeMinutes = 60;
 constexpr uint32_t FreezeCheckpointSeconds = 15 * 60;
@@ -245,7 +245,8 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
   uint8_t legacyDigest[sizeof(snapshot.digest)];
   constexpr size_t prefixes[] = {offsetof(Snapshot, traffic), offsetof(Snapshot, airtime_share),
                                  offsetof(Snapshot, probation), offsetof(Snapshot, freeze_seconds),
-                                 offsetof(Snapshot, floors), offsetof(Snapshot, subnet)};
+                                 offsetof(Snapshot, floors), offsetof(Snapshot, subnet),
+                                 offsetof(Snapshot, onboarding)};
   uint8_t version = 5;
   for (const size_t prefix : prefixes) {
     if (size == prefix + sizeof(legacyDigest)) break;
@@ -267,19 +268,22 @@ bool RuleStore::load(const char* path, Snapshot& snapshot) {
   if (version < 8) snapshot.probation = {};
   if (version < 9) snapshot.freeze_seconds = {};
   if (version < 10) memset(snapshot.floors, 0, sizeof(snapshot.floors));
-  memset(snapshot.subnet, 0, sizeof(snapshot.subnet));
-  memset(snapshot.authorities, 0, sizeof(snapshot.authorities));
-  const uint8_t empty[PUB_KEY_SIZE]{};
-  const uint8_t legacyGrants = (snapshot.domain[0] ? scopePermission(Global) : 0)
-                             | (snapshot.domain[0] && snapshot.region[0] ? scopePermission(Region) : 0);
-  if (legacyGrants) {
-    for (const auto& peer : snapshot.trusted_peers) {
-      if (memcmp(peer, empty, sizeof(empty)) == 0) continue;
-      auto* authority = authorityFor(snapshot, peer);
-      memcpy(authority->key, peer, PUB_KEY_SIZE);
-      authority->permissions = legacyGrants;
+  if (version < 11) {
+    memset(snapshot.subnet, 0, sizeof(snapshot.subnet));
+    memset(snapshot.authorities, 0, sizeof(snapshot.authorities));
+    const uint8_t empty[PUB_KEY_SIZE]{};
+    const uint8_t legacyGrants = (snapshot.domain[0] ? scopePermission(Global) : 0)
+                               | (snapshot.domain[0] && snapshot.region[0] ? scopePermission(Region) : 0);
+    if (legacyGrants) {
+      for (const auto& peer : snapshot.trusted_peers) {
+        if (memcmp(peer, empty, sizeof(empty)) == 0) continue;
+        auto* authority = authorityFor(snapshot, peer);
+        memcpy(authority->key, peer, PUB_KEY_SIZE);
+        authority->permissions = legacyGrants;
+      }
     }
   }
+  snapshot.onboarding = snapshot.subnet[0] != 0;
   mesh::Utils::sha256(snapshot.digest, sizeof(snapshot.digest), bytes, offsetof(Snapshot, digest));
   return true;
 }
@@ -292,7 +296,8 @@ bool RuleStore::validate(const Snapshot& snapshot, const mesh::Identity& node) {
       || snapshot.airtime_share > 100
       || snapshot.room_name[sizeof(snapshot.room_name) - 1]
       || snapshot.domain[ScopeNameSize - 1] || snapshot.region[ScopeNameSize - 1]
-      || snapshot.subnet[ScopeNameSize - 1]) return false;
+      || snapshot.subnet[ScopeNameSize - 1] || snapshot.onboarding > 1
+      || (snapshot.onboarding && !snapshot.subnet[0])) return false;
 
   uint8_t digest[sizeof(snapshot.digest)];
   mesh::Utils::sha256(digest, sizeof(digest), reinterpret_cast<const uint8_t*>(&snapshot),
@@ -416,7 +421,7 @@ void RuleStore::handleRecoveryCommand(const char* command, char* reply) {
   const char* arg;
   if (savemesh::matchesValue(command, "recovery")) {
     snprintf(reply, 150, "storage=%s forwarding=%s last=%lu", _ready ? "ready" : "recovery",
-             forwardingAllowed() ? "available" : "held",
+             transitAllowed() ? "available" : "held",
              static_cast<unsigned long>(decodeRevision(_state.revision)));
   } else if (savemesh::matchesValue(command, "resume")) {
     if (!_ready || !_forwarding_hold || !_fs->remove(ForwardingHold)) {
@@ -445,6 +450,7 @@ void RuleStore::handleRecoveryCommand(const char* command, char* reply) {
     _forwarding_hold = true;
 
     _candidate = empty ? Snapshot{} : _state;
+    _candidate.onboarding = _candidate.subnet[0] != 0;
     // Recovered revisions can precede peer sessions established before the failure.
     memset(_candidate.sync_key, 0, sizeof(_candidate.sync_key));
     memcpy(_candidate.magic, Magic, sizeof(Magic));
@@ -565,7 +571,18 @@ bool RuleStore::setScope(Scope scope, const char* name) {
   char* field = scope == Global ? _candidate.domain : scope == Region ? _candidate.region : _candidate.subnet;
   memset(field, 0, ScopeNameSize);
   memcpy(field, name, length);
+  if (scope == Subnet) _candidate.onboarding = 1;
   encodeRevision(_candidate.revision, decodeRevision(_state.revision) + 1);
+  return commit();
+}
+
+bool RuleStore::startOnboarding() {
+  const uint32_t revision = decodeRevision(_state.revision);
+  if (!_ready || !_state.subnet[0] || revision == UINT32_MAX) return false;
+  if (onboarding()) return true;
+  _candidate = _state;
+  _candidate.onboarding = 1;
+  encodeRevision(_candidate.revision, revision + 1);
   return commit();
 }
 
