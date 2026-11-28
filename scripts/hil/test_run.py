@@ -38,6 +38,14 @@ class AdvertPolicyTest(unittest.TestCase):
         self.assertEqual(report["samples"], [])
 
 
+    def test_private_only_fixture_skips_public_filter_suite(self):
+        report = {"cases": [], "samples": [], "temporary_rules": {}, "cleanup": {}}
+        run_scenarios({}, report, ("filtering",), private_channel_only=True)
+        self.assertEqual(report["cases"][0]["status"], "SKIP")
+        self.assertIn("private channels only", report["cases"][0]["reason"])
+        self.assertEqual(report["samples"], [])
+
+
 class QuietDeliveryTest(unittest.TestCase):
     def test_receipt_matches_stock_channel_frame_and_ignores_other_messages(self):
         timestamp = 1795000020
