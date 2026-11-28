@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from glob import glob
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -39,8 +40,10 @@ GET_CHANNEL = 31
 CONTACT_INFO = 3
 TEXT_SENT = 6
 CONTACT_MESSAGE = 7
+CHANNEL_MESSAGE = 8
 NO_MORE_MESSAGES = 10
 CONTACT_MESSAGE_V3 = 16
+CHANNEL_MESSAGE_V3 = 17
 CLI_REPLY = 1
 CLI_COMMAND = 3
 CHANNEL_INFO = 18
@@ -48,6 +51,8 @@ PUBLIC_KEY = bytes.fromhex("8b3387e9c5cd6a6ac9e5edbaa115cd72")
 DEVICE_INFO = 13
 SELF_INFO = 5
 RAW_RX = 0x88
+QUIET_TRIALS = 20
+QUIET_INTERVAL_SECONDS = 60
 
 
 class Skip(Exception):
@@ -108,6 +113,20 @@ def decode_public_text(frame):
     if payload[0] != 0x11 or (len(payload) - 3) % 16:
         return None
     return sha256(payload).hexdigest()[:16], path
+
+
+def decode_quiet_receipt(frame, text, timestamp):
+    if not frame or frame[0] not in (CHANNEL_MESSAGE, CHANNEL_MESSAGE_V3):
+        return None
+    offset = 4 if frame[0] == CHANNEL_MESSAGE_V3 else 1
+    if len(frame) <= offset + 7 or frame[offset] != 0 or frame[offset + 2] != 0:
+        return None
+    path = frame[offset + 1]
+    if path == 0xff or struct.unpack_from("<I", frame, offset + 3)[0] != timestamp:
+        return None
+    if not frame[offset + 7:].endswith(b": " + text):
+        return None
+    return path & 63
 
 
 def decode_cli_reply(frame, repeater_key):
@@ -541,6 +560,92 @@ def sample_public_text(devices, expect_forward, report):
             raise Failure(f"No direct observation and filter-drop evidence from {role}.")
 
 
+def quiet_summary(samples):
+    latencies = sorted(sample["latency_s"] for sample in samples if sample["delivered"])
+    return {"attempted": len(samples), "delivered": len(latencies),
+            "delivery_rate": len(latencies) / len(samples),
+            "p95_s": latencies[math.ceil(len(latencies) * .95) - 1] if latencies else None}
+
+
+def quiet_criteria(current, baseline):
+    if baseline["p95_s"] is None:
+        raise Failure("The baseline did not record a routed delivery.")
+    limit = baseline["p95_s"] + max(2, baseline["p95_s"] * .20)
+    return {"p95_limit_s": limit, "delivery_pass": current["delivery_rate"] >= .95,
+            "latency_pass": current["p95_s"] is not None and current["p95_s"] <= limit}
+
+
+def validate_quiet_baseline(baseline, current):
+    if (baseline.get("status") != "PASS" or baseline.get("operation") != "quiet"
+            or baseline.get("repeater_profile") != "savemeshcore"
+            or len(baseline.get("samples", ())) != QUIET_TRIALS):
+        raise Skip("A complete SaveMeshcore quiet comparison report is required.")
+    for role in ROLES:
+        old, new = baseline["devices"][role], current[role]
+        keys = ("board", "radio", "key_fingerprint", "filters") if role in REPEATERS else (
+            "board", "radio", "key_fingerprint", "version")
+        if any(old.get(key) != new.get(key) for key in keys):
+            raise Skip(f"{role} identity, radio settings, or comparison profile differs from the baseline.")
+    return quiet_summary(baseline["samples"])
+
+
+def run_quiet(devices, report, baseline_report):
+    receiver = devices["ACTOR"]
+    if not receiver.test_only_inbox:
+        raise Skip("Quiet comparison requires a dedicated ACTOR inbox and test_only_inboxes=true.")
+    for role in ("ADMIN", "ACTOR"):
+        channel = devices[role].request(bytes((GET_CHANNEL, 0)), CHANNEL_INFO)
+        if len(channel) < 50 or channel[34:50] != PUBLIC_KEY:
+            raise Skip(f"{role} needs the stock Public channel in slot 0.")
+    for role in REPEATERS:
+        details = devices[role].details
+        if not details.get("configured_firmware_sha256") or not details.get("configured_firmware_git_sha"):
+            raise Skip(f"Record the installed {role} image hash and source commit in the local config.")
+        if details["filters"]["public"] != "off":
+            raise Skip(f"{role} must start with Public filtering off for quiet comparison.")
+    reference = validate_quiet_baseline(baseline_report, report["devices"]) if baseline_report is not None else None
+
+    for index in range(QUIET_TRIALS):
+        sent_at = time.monotonic()
+        report["samples"].append(quiet_trial(devices, index + 1))
+        if index + 1 < QUIET_TRIALS:
+            time.sleep(max(0, QUIET_INTERVAL_SECONDS - (time.monotonic() - sent_at)))
+    summary = quiet_summary(report["samples"])
+    report["quiet"] = summary
+    if reference:
+        result = quiet_criteria(summary, reference)
+        report["quiet_comparison"] = dict(result, baseline=reference)
+        if not result["delivery_pass"] or not result["latency_pass"]:
+            raise Failure("Hardened missed the quiet delivery or latency threshold.")
+    elif summary["delivered"] == 0:
+        raise Failure("SaveMeshcore recorded no routed companion deliveries.")
+
+
+def quiet_trial(devices, sequence):
+    sender, receiver = devices["ADMIN"], devices["ACTOR"]
+    before = {role: int(json.loads(devices[role].cli("stats-packets"))["flood_tx"]) for role in REPEATERS}
+    text = f"HIL quiet {uuid.uuid4().hex[:8]}".encode("ascii")
+    timestamp = int(time.time())
+    started = time.monotonic()
+    sender.request(bytes((SEND_CHANNEL_TEXT, 0, 0)) + struct.pack("<I", timestamp) + text, 0)
+    hops, latency = None, None
+    while time.monotonic() - started < 15:
+        frame = receiver.request(bytes((NEXT_MESSAGE,)),
+                                 (NO_MORE_MESSAGES, CHANNEL_MESSAGE, CHANNEL_MESSAGE_V3,
+                                  CONTACT_MESSAGE, CONTACT_MESSAGE_V3))
+        hops = decode_quiet_receipt(frame, text, timestamp)
+        if hops is not None:
+            latency = round(time.monotonic() - started, 3)
+            break
+        if frame[0] == NO_MORE_MESSAGES:
+            time.sleep(.1)
+    after = {role: int(json.loads(devices[role].cli("stats-packets"))["flood_tx"]) for role in REPEATERS}
+    deltas = {role: (after[role] - before[role]) & 0xffffffff for role in REPEATERS}
+    return {"trial": sequence, "sender": "ADMIN", "receiver": "ACTOR", "hops": hops,
+            "flood_tx_delta": deltas, "latency_s": latency,
+            "delivered": hops == len(REPEATERS) and all(n == 1 for n in deltas.values())}
+
+
 def test_filtering(devices, report):
     for role in ("ADMIN", "ACTOR"):
         channel = devices[role].request(bytes((GET_CHANNEL, 0)), CHANNEL_INFO)
@@ -899,6 +1004,10 @@ def write_report(path, report):
             f"Observed RF trials: {len(report['samples'])}"]
     rows.extend(f"- {role}: {device['board']} ({device['version']})"
                 for role, device in report["devices"].items())
+    if "quiet" in report:
+        measured = report["quiet"]
+        rows.extend(["", f"Routed deliveries: {measured['delivered']}/{measured['attempted']}",
+                     f"Delivered-message p95 latency (seconds): {measured['p95_s']}"])
     rows.extend(f"- Cleanup {role}: {message}" for role, message in report["cleanup"].items())
     rows.extend(f"- {case['name']}: {case['status']} — {case['reason']}" for case in report.get("cases", []))
     path.with_suffix(".md").write_text("\n".join(rows) + "\n")
@@ -950,17 +1059,22 @@ def main():
     actions.add_argument("--pin", action="store_true", help="Pin verified USB identities in the private config.")
     actions.add_argument("--preflight", action="store_true", help="Check bench prerequisites without transmitting.")
     actions.add_argument("--smoke", action="store_true", help="Run the five-advert deny and cleanup scenario.")
-    actions.add_argument("--suite", choices=(*SCENARIOS, *PREPARED_SCENARIOS, "identity"))
+    actions.add_argument("--suite", choices=(*SCENARIOS, *PREPARED_SCENARIOS, "quiet", "identity"))
     actions.add_argument("--all", action="store_true", help="Run implemented live scenarios and record remaining coverage.")
     parser.add_argument("--baseline", action="store_true",
-                        help="Use the SaveMeshcore baseline profile for read-only preflight.")
+                        help="Select the SaveMeshcore firmware profile for preflight or quiet measurement.")
+    parser.add_argument("--baseline-report", type=Path, help="Use a prior SaveMeshcore quiet JSON report.")
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--report", type=Path, default=Path("out/hil/actor"))
     parser.add_argument("--isolated-rf", action="store_true",
                         help="Confirm legal settings and RF isolation and authorize temporary local bench settings.")
     args = parser.parse_args()
-    if args.baseline and not args.preflight:
-        parser.error("--baseline requires --preflight")
+    if args.baseline and not (args.preflight or args.suite == "quiet"):
+        parser.error("--baseline requires --preflight or --suite quiet")
+    if args.suite == "quiet" and args.baseline == bool(args.baseline_report):
+        parser.error("Quiet measurement requires either --baseline or --baseline-report")
+    if args.baseline_report and args.suite != "quiet":
+        parser.error("--baseline-report requires --suite quiet")
     if args.list:
         for port in ports():
             if port.vid is not None and port.pid is not None:
@@ -972,6 +1086,7 @@ def main():
               "operation": args.suite or ("baseline-preflight" if args.baseline else "preflight" if args.preflight
                                           else "identify" if args.identify
                                           else "pin" if args.pin else "all" if args.all else "actor"),
+              "repeater_profile": "savemeshcore" if args.baseline else "hardened",
               "devices": {}, "cases": [], "samples": [], "temporary_rules": {}, "cleanup": {}}
     stage = "preflight"
     try:
@@ -1017,6 +1132,15 @@ def main():
                 if args.preflight:
                     profile = "SaveMeshcore baseline" if args.baseline else "Hardened"
                     report.update(status="PASS", reason=f"Four-device {profile} preflight passed. RF not run.")
+                elif args.suite == "quiet":
+                    if not args.isolated_rf:
+                        raise Skip("Quiet measurement requires the isolated four-device RF topology.")
+                    baseline = json.loads(args.baseline_report.read_text()) if args.baseline_report else None
+                    if args.baseline_report and not isinstance(baseline, dict):
+                        raise Skip("The SaveMeshcore quiet report must be a JSON object.")
+                    stage = "RF"
+                    run_quiet(devices, report, baseline)
+                    report.update(status="PASS", reason="Quiet stock-client delivery measurement recorded.")
                 else:
                     selected = tuple(SCENARIOS) if args.all else (args.suite or "actor",)
                     if any(name not in SCENARIOS and name not in PREPARED_SCENARIOS for name in selected):
