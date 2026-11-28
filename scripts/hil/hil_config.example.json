@@ -1,4 +1,5 @@
 {
+  "test_only_inboxes": false,
   "roles": {
     "R1": {"serial_number": "RAK_1W_USB_SERIAL", "public_key": ""},
     "R2": {"location": "THINKNODE_M5_USB_LOCATION", "vid_pid": "1a86:7522", "public_key": ""},

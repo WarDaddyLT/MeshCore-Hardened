@@ -31,8 +31,18 @@ CONFIG = Path(__file__).with_name("hil_config.local.json")
 DEVICE_QUERY = 22
 APP_START = 1
 SEND_SELF_ADVERT = 7
+SEND_CONTACT_TEXT = 2
 SEND_CHANNEL_TEXT = 3
+NEXT_MESSAGE = 10
+GET_CONTACT = 30
 GET_CHANNEL = 31
+CONTACT_INFO = 3
+TEXT_SENT = 6
+CONTACT_MESSAGE = 7
+NO_MORE_MESSAGES = 10
+CONTACT_MESSAGE_V3 = 16
+CLI_REPLY = 1
+CLI_COMMAND = 3
 CHANNEL_INFO = 18
 PUBLIC_KEY = bytes.fromhex("8b3387e9c5cd6a6ac9e5edbaa115cd72")
 DEVICE_INFO = 13
@@ -98,6 +108,17 @@ def decode_public_text(frame):
     if payload[0] != 0x11 or (len(payload) - 3) % 16:
         return None
     return sha256(payload).hexdigest()[:16], path
+
+
+def decode_cli_reply(frame, repeater_key):
+    if not frame or frame[0] not in (CONTACT_MESSAGE, CONTACT_MESSAGE_V3):
+        return None
+    offset = 4 if frame[0] == CONTACT_MESSAGE_V3 else 1
+    if len(frame) <= offset + 12 or frame[offset:offset + 6] != repeater_key[:6]:
+        return None
+    if frame[offset + 7] != CLI_REPLY:
+        return None
+    return frame[offset + 12:].decode("ascii", errors="replace")
 
 
 def ports():
@@ -187,15 +208,33 @@ class Device:
         return None
 
     def request(self, payload, expected):
+        accepted = (expected,) if isinstance(expected, int) else expected
         self.usb.write(b"<" + struct.pack("<H", len(payload)) + payload)
         end = time.monotonic() + 4
         while time.monotonic() < end:
             frame = self.frame()
-            if frame and frame[0] == expected:
+            if frame and frame[0] in accepted:
                 return frame
             if frame and frame[0] == 1:
                 raise Failure(f"{self.name} rejected companion command {payload[0]}.")
         raise Failure(f"{self.name} did not answer companion command {payload[0]}.")
+
+    def repeater_reply(self, repeater, command):
+        key = bytes.fromhex(repeater.key)
+        header = bytes((SEND_CONTACT_TEXT, CLI_COMMAND, 0)) + struct.pack("<I", 0)
+        self.request(header + key[:6] + command, TEXT_SENT)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            frame = self.request(bytes((NEXT_MESSAGE,)),
+                                 (NO_MORE_MESSAGES, CONTACT_MESSAGE, CONTACT_MESSAGE_V3, 8, 17))
+            if frame[0] == NO_MORE_MESSAGES:
+                time.sleep(0.5)
+                continue
+            reply = decode_cli_reply(frame, key)
+            if reply is None:
+                raise Failure(f"{self.name} returned a message unrelated to the test request.")
+            return reply
+        raise Failure(f"{self.name} did not receive a CLI reply from {repeater.name}.")
 
     def identify(self):
         if self.name in REPEATERS:
@@ -347,6 +386,41 @@ def test(devices, report):
         if any(value != "removed" for value in report["cleanup"].values()):
             raise Failure("A temporary deny could not be confirmed removed. See report cleanup.")
     sample(devices, "ACTOR", "ADMIN", True, report)
+
+
+def test_remote_acl(devices, report):
+    admin, actor = devices["ADMIN"], devices["ACTOR"]
+    if not admin.test_only_inbox or not actor.test_only_inbox:
+        raise Skip("The ACL case needs companion inboxes reserved for test replies.")
+    for role in REPEATERS:
+        repeater = devices[role]
+        key = bytes.fromhex(repeater.key)
+        for companion in (admin, actor):
+            try:
+                contact = companion.request(bytes((GET_CONTACT,)) + key, CONTACT_INFO)
+            except Failure:
+                raise Skip(f"{companion.name} needs {role} imported as a stock repeater contact.") from None
+            if contact[1:33] != key:
+                raise Skip(f"{companion.name} did not return the pinned {role} contact.")
+    for role in REPEATERS:
+        repeater = devices[role]
+        before = pairs(repeater.cli("rules status"))
+        if before.get("mode") != "normal":
+            raise Skip(f"{role} must start and remain in Normal for the ACL case.")
+        if admin.repeater_reply(repeater, b"rules mode normal") != "OK":
+            raise Failure(f"{role} did not acknowledge ADMIN's existing Normal setting.")
+        readable = pairs(actor.repeater_reply(repeater, b"rules status"))
+        if readable.get("rev") != before["rev"] or readable.get("mode") != "normal":
+            raise Failure(f"{role} did not return its policy status to the provisioned read-only client.")
+        denied = actor.repeater_reply(repeater, b"rules mode normal")
+        after = pairs(repeater.cli("rules status"))
+        if denied != "Err - write permission required":
+            raise Failure(f"{role} did not explicitly deny the read-only client's admin command.")
+        if after.get("rev") != before["rev"] or after.get("mode") != "normal":
+            raise Failure(f"{role} changed the policy during the ACL case.")
+        report["samples"].append({"type": "stock remote authorization", "repeater": role,
+                                  "admin_acknowledged": True, "actor_denied": True,
+                                  "revision_before": before["rev"], "revision_after": after["rev"]})
 
 
 def test_modes(devices, report):
@@ -616,12 +690,13 @@ def write_report(path, report):
 
 SCENARIOS = {
     "actor": (test, "Temporary attributable deny, legitimate forwarding, and cleanup verified."),
+    "acl": (test_remote_acl, "ADMIN commands and read-only client denial verified over stock MeshCore."),
     "filtering": (test_filtering, "Public filter forwarding, drops, unaffected adverts, and cleanup verified."),
     "security": (test_modes, "Protected and Locked admission, legitimate forwarding, and cleanup verified."),
     "sync": (test_sync, "Signed subnet propagation, peer confirmation, and Normal restore verified."),
 }
 
-REMAINING = ("stock remote ACL", "complete filter regression", "shared rules, deletion and onboarding",
+REMAINING = ("remaining ACL cases", "complete filter regression", "shared rules, deletion and onboarding",
              "stock Android and room identity", "signed neighbour notices", "baseline comparison")
 
 
@@ -681,6 +756,7 @@ def main():
             devices = {}
             for role, port in select_ports(config).items():
                 device = Device(role, port)
+                device.test_only_inbox = config.get("test_only_inboxes") is True
                 stack.callback(device.usb.close)
                 devices[role] = device
             time.sleep(1)
@@ -713,7 +789,7 @@ def main():
                 if args.preflight:
                     report.update(status="PASS", reason="Four-device preflight passed. RF not run.")
                 else:
-                    selected = tuple(SCENARIOS) if args.all else ("actor" if args.suite == "acl" else args.suite or "actor",)
+                    selected = tuple(SCENARIOS) if args.all else (args.suite or "actor",)
                     if any(name not in SCENARIOS for name in selected):
                         raise Skip(f"The {args.suite} suite is not implemented in this runner.")
                     if not args.isolated_rf:
@@ -724,15 +800,15 @@ def main():
                         status = "PASS"
                         if any(case["status"] == "FAIL" for case in report["cases"]):
                             status = "FAIL"
-                        elif args.all or args.suite == "acl" or any(case["status"] == "SKIP" for case in report["cases"]):
+                        elif args.all or any(case["status"] == "SKIP" for case in report["cases"]):
                             status = "SKIP"
                         covered = {case["name"] for case in report["cases"]}
                         report["cases"].extend(
                             {"name": name, "status": "SKIP", "reason": "Earlier scenario failed."}
                             for name in selected if name not in covered
                         )
-                        if args.all or args.suite == "acl":
-                            report["unrun"] = list(REMAINING if args.all else ("stock remote ACL",))
+                        if args.all:
+                            report["unrun"] = list(REMAINING)
                             report["cases"].extend(
                                 {"name": name, "status": "SKIP", "reason": "Release coverage still pending."}
                                 for name in report["unrun"]
