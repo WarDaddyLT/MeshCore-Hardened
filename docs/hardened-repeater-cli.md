@@ -151,6 +151,7 @@ rules untrust <64-hex-repeater-public-key>
 rules subnet [name]
 rules subnet mode [normal|protected|locked]
 rules subnet sync
+rules subnet peer [query] <64-hex-repeater-public-key>
 rules onboarding
 rules onboarding start
 rules authority <64-hex-public-key>
@@ -176,6 +177,10 @@ On both repeaters, set the same dedicated random sync key and trust the other's 
 Session frames go directly between authenticated peers. For a peer to carry another publisher's signed rules or checkpoints, grant that peer `rules relay allow <key>` on the receiver. The receiver still verifies the original publisher and scope. Peer handshakes, rule updates, and checkpoint frames use the same one-frame-per-minute transmit budget. A session and its sequence counters are volatile. Reconnect and run `rules sync` after a reboot or an expired session.
 
 `rules subnet mode` shows the committed signed mode, hexadecimal revision, local setting, and effective mode. A local administrator can publish a new mode only when the repeater's own key has a subnet publisher grant. Members retain their last verified revision during a partition. Each signed mode fits in one 130-byte control payload. Newer revisions win, with a tie between distinct publishers resolved by the lexicographically greater full public key. A trusted session that reconnects queues the last committed mode. Third-party mode records require the same explicit relay grant as other policy. The more restrictive local mode stays in force. Retirement blocks new updates from the retired key and keeps the last committed mode until an authorized publisher replaces it.
+
+Use `rules subnet peer query <key>` on an authenticated subnet link to request the peer's committed revision, effective mode, and transit state. Read the last response with `rules subnet peer <key>`. A matching reply is `confirmed` for up to five minutes while the session remains active. A different revision, expired confirmation, or disconnected session is `stale`. A peer that has never answered is `unknown`. A fresh reply can confirm a revision while the peer reports its transit as held. These confirmations describe what the peer reported when it answered. They produce no periodic polling.
+
+When a domain session reconnects, shared rules and retained deletions are queued again. An origin that has compacted its deletions can also rebuild and resend its signed checkpoints. Local rules stay local. A stale subnet status response queues the latest local signed subnet mode for reconciliation. Request confirmation again after it arrives.
 
 Grant a full origin key separately for each scope where a receiving repeater should accept its signatures. A repeater's own key can issue global and regional rules after configuring the corresponding scope. Subnet publishing requires its own grant. On upgrade, any previously trusted keys retain their existing global or regional publishing permissions. New `rules trust` entries grant peer permission only.
 

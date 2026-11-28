@@ -44,6 +44,7 @@ void MyMesh::handleCheckpointCommand(const char* args, char* reply, bool canWrit
     return;
   }
   _checkpoint_transfer = CheckpointTransfer::Sending;
+  _checkpoint_reconcile &= ~(uint8_t(1) << scope);
   _checkpoint_cursor = 0;
   _checkpoint_peer_cursor = 0;
   memset(_checkpoint_sender, 0, sizeof(_checkpoint_sender));
@@ -95,9 +96,23 @@ void MyMesh::sendCheckpointPacket() {
   if (_checkpoint_transfer == CheckpointTransfer::Receiving && millisHasNowPassed(_checkpoint_expiry)) {
     _checkpoint_transfer = CheckpointTransfer::Idle;
   }
-  if (_checkpoint_transfer != CheckpointTransfer::Sending || !_rules.forwardingAllowed()
-      || _mgr->getOutboundTotal() != 0 || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)
+  if (!_rules.forwardingAllowed() || _mgr->getOutboundTotal() != 0
+      || mesh::Utils::isZeroes(_rules.syncKey(), CIPHER_KEY_SIZE)
       || (_next_policy_tx && !millisHasNowPassed(_next_policy_tx))) return;
+  if (_checkpoint_transfer == CheckpointTransfer::Idle && _checkpoint_reconcile) {
+    for (const auto scope : {RuleStore::Global, RuleStore::Region}) {
+      const uint8_t pending = uint8_t(1) << scope;
+      if (!(_checkpoint_reconcile & pending)) continue;
+      _checkpoint_reconcile &= ~pending;
+      if (!_rules.makeCheckpoint(scope, self_id, _checkpoint, _checkpoint_records)) continue;
+      _checkpoint_cursor = 0;
+      _checkpoint_peer_cursor = 0;
+      memset(_checkpoint_sender, 0, sizeof(_checkpoint_sender));
+      _checkpoint_transfer = CheckpointTransfer::Sending;
+      break;
+    }
+  }
+  if (_checkpoint_transfer != CheckpointTransfer::Sending) return;
   const auto scope = static_cast<RuleStore::Scope>(_checkpoint.scope);
   TransportKey transport{};
   if (!checkpointTransport(scope, transport) || !_rules.publisherAllowed(scope, _checkpoint.origin, self_id)) {

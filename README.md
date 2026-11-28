@@ -252,6 +252,8 @@ To share a mode, configure the same subnet name on its member repeaters and gran
 
 `rules subnet mode` shows the subnet mode and revision, the local mode, and the effective mode. A reconnect queues the last committed update for authenticated subnet peers. An administrator can also use `rules subnet sync` to resend it. Policy propagation stays within the existing packet and airtime limits. [Shared policy commands](docs/hardened-repeater-cli.md#shared-policy)
 
+Use `rules subnet peer query <key>` to ask an authenticated peer what it committed. Use `rules subnet peer <key>` to read its last reported revision, effective mode, and forwarding state. Confirmations expire, and a peer without a fresh matching response is shown as stale or unknown. [Peer confirmation commands](docs/hardened-repeater-cli.md#shared-policy)
+
 Policy sync is opt-in. For repeaters A and B, read each primary public key with `get public.key`. Generate a dedicated 16-byte sync key and provision it on both devices over USB. Give both devices the same domain name.
 
 On A:

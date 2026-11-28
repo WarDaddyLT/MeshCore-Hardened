@@ -96,6 +96,7 @@ public:
                         const uint8_t* requiredOrigin = nullptr);
   bool makeCheckpoint(Scope scope, const mesh::LocalIdentity& node, Checkpoint& checkpoint,
                       Rule (&records)[Capacity]) const;
+  bool hasCheckpointFloor(Scope scope, const mesh::Identity& node) const;
   MergeResult checkCheckpoint(const Checkpoint& checkpoint, const mesh::Identity& node,
                               bool local = false) const;
   MergeResult installCheckpoint(const Checkpoint& checkpoint, const Rule* records, size_t count,

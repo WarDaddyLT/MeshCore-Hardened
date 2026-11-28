@@ -656,6 +656,7 @@ bool MyMesh::shouldExportToBridge(mesh::Packet* packet) {
   if (isCheckpointPacket(*packet)) return false;
   if (isPeerHandshake(*packet)) return false;
   if (isSubnetModePacket(*packet)) return false;
+  if (isSubnetStatusPacket(*packet)) return false;
   if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
       && (!verifyReceivedAdvert(*packet) || !allowVerifiedAdvert(*packet, false))) return false;
   return !shouldDropByRate(packet, _bridge_forward_budget);
@@ -711,6 +712,10 @@ mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
   }
   if (isSubnetModePacket(*pkt)) {
     receiveSubnetMode(*pkt);
+    return ACTION_RELEASE;
+  }
+  if (isSubnetStatusPacket(*pkt)) {
+    receiveSubnetStatus(*pkt);
     return ACTION_RELEASE;
   }
   if (pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL && pkt->payload_len
@@ -855,6 +860,7 @@ bool MyMesh::handleAuthorityCommand(const char* command, char* reply, bool usb, 
     return true;
   }
   if (matchCommand(command, "subnet", &args)) {
+    if (handleSubnetStatusCommand(args, reply, can_write)) return true;
     const char* modeArg;
     if (matchCommand(args, "mode", &modeArg)) return false;
     if (matchesValue(args, "sync")) {
@@ -2046,6 +2052,7 @@ void MyMesh::loop() {
   sendNeighbourNotice();
   servicePolicyPeers();
   sendSubnetMode();
+  sendSubnetStatus();
   sendCheckpointPacket();
   sendPolicyUpdate();
 
