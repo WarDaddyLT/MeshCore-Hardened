@@ -63,6 +63,7 @@ public:
   bool setNeighbourChannel(const uint8_t* key);
   const uint8_t* syncKey() const { return _state.sync_key; }
   bool setSyncKey(const uint8_t* key);
+  uint32_t reservePeerEpoch();
   bool loadRoomIdentity(mesh::LocalIdentity& identity) const;
   bool saveRoomIdentity(mesh::LocalIdentity& identity);
   bool roomEnabled() const { return _state.room_enabled; }
@@ -79,7 +80,8 @@ public:
   bool setRelay(const uint8_t* key, bool allow);
   void describeAuthority(const uint8_t* key, const mesh::Identity& node, char* reply) const;
   const Rule* exportRule(size_t index) const;
-  MergeResult mergeRule(Rule& rule, const uint8_t* fingerprint, const mesh::Identity& node);
+  MergeResult mergeRule(Rule& rule, const uint8_t* fingerprint, const mesh::Identity& node,
+                        const uint8_t* requiredOrigin = nullptr);
   bool makeCheckpoint(Scope scope, const mesh::LocalIdentity& node, Checkpoint& checkpoint,
                       Rule (&records)[Capacity]) const;
   MergeResult checkCheckpoint(const Checkpoint& checkpoint, const mesh::Identity& node,
