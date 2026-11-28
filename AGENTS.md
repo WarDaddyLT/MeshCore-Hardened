@@ -333,6 +333,8 @@ For each case, document the actual steps, input frames or commands, expected out
 
 Implement the firmware features first and produce flashable development builds early. Compile the selected repeater target as features land. Defer writing and running formal tests, including native and four-device HIL suites, to the validation phase. Keep a living task plan in `docs/implementation-plan.md`, marking each item `TODO / IN PROGRESS / VERIFIED / BLOCKED` and linking to available build or validation evidence.
 
+Track each backlog item in its own GitHub issue. Include the fix plan and acceptance criteria in that same issue. Once GitHub assigns the issue number, prefix the title with `MSHCHRD-<number>` and a space. For example, issue 11 uses `MSHCHRD-11 Reclaim rule capacity without reviving deleted rules`. Use that identifier when linking to the item in repository documentation and cross-references.
+
 1. **Audit and baseline**: inspect actual code, licenses, PlatformIO targets, storage layout, crypto and existing CLI; capture a baseline repeater build and document the existing filters, preserve identity; initialize clean independent Git repository if needed.
 2. **RuleStore + CLI**: active allow/deny/filter table, durable IDs, exact-ID deletion, revision/tombstone behavior and pagination; use primary repeater remote CLI first.
 3. **Packet policy**: integrate existing filters and verifiable-identity ACL at all forwarding gates; clear fallback for unattributable legacy traffic and add drop counters.
@@ -344,6 +346,17 @@ Implement the firmware features first and produce flashable development builds e
 
 Do not make feature 6 block early delivery of features 1–5. Do not enable a misleading or insecure room-interface fallback merely to claim completion.
 
+### GitHub project tracking
+
+Use the [repository issues](https://github.com/WarDaddyLT/MeshCore-Hardened/issues) and the [MeshCore Hardened Project](https://github.com/users/WarDaddyLT/projects/1) to keep progress visible. Update GitHub as part of the task, including when work starts, a pull request opens or merges, validation produces a result, or a blocker changes.
+
+- Before starting, find or create the `MSHCHRD` issue. Record the outcome, implementation plan, acceptance criteria, dependencies, and required validation in the issue. Link actual blocking issues and order dependent work after its prerequisites in the roadmap.
+- Split larger outcomes into native GitHub sub-issues when the pieces can be implemented or verified separately. Give each sub-issue its own scope, evidence and status. Keep the parent issue's summary and acceptance checklist current as its children finish so the Project can show progress through the Sub-issues progress field.
+- Assign the native issue type (`Bug`, `Feature`, or `Task`), the Project, and applicable labels. Use multiple labels where appropriate. For implementation work, use `layer: foundation` for prerequisites, `layer: building-block` for reusable capabilities, or `layer: network-feature` for features composed from lower layers. Use testing, release, and hardware-validation labels where relevant. Set priority, ownership, and milestones when known. Keep tentative dates identifiable as estimates and leave unconfirmed dates unset.
+- Set the **native repository issue status** and verify the matching Project `Status`. `Backlog` is for captured work outside the current plan. `Todo` is planned work that has not started. `In progress` begins when implementation or evidence collection starts. `In review` means implementation is ready for review or acceptance checks. `Done` requires all issue acceptance criteria to be met. Use `Not planned` only for an explicit decision to drop the work and `Duplicate` only with the canonical issue linked.
+- Use one branch and linked pull request per task. Update the issue with links to the implementation, merged commit, build artifacts, and test evidence. Keep the acceptance checklist current and distinguish a passing test from a failed, skipped, or pending one. For a blocked task, record what is missing and the next action. Keep the issue open while required validation is pending, including after the implementation merges.
+- Keep the Project board and roadmap aligned with issue status, dependencies, and release gates. Publish a Project update for material changes such as phase completion, a change to the critical path, or a new release blocker. Include what landed, the evidence available, what remains blocked, and what comes next.
+
 ## 13. Build, quality and release requirements
 
 - Examine actual PlatformIO configuration before selecting `pio run -e <actual_repeater_environment>`; never invent an environment name. Build at least the actual nRF52840 test-board target and any other repeater boards included in the initial release.
@@ -352,6 +365,7 @@ Do not make feature 6 block early delivery of features 1–5. Do not enable a mi
 - Include defensive parsing and cover CLI and over-the-air admin protocol fuzz cases during formal validation. No unchecked lengths, unauthenticated execution, secret leakage or unbounded queues.
 - Document per-target firmware size, free RAM, free nonvolatile storage and battery/airtime impacts. If external flash is available, use it only through a verified driver and explicit capacity detection.
 - CI must build without physical radios. During formal validation, run native tests in CI and invoke HIL separately with the four real devices. An absent bench leaves hardware validation pending.
+- Create a GitHub Alpha release only after the exact release candidate passes the physical four-device LoRa bad-actor tests. Link the passing report from the release issue and record the tested image hashes and forwarding evidence for both repeaters and the legitimate client.
 - Never commit private signing keys, live client keys, fleet admin secrets, private channel keys, exact sensitive node positions or `hil_config.local.json`. Supply templates and test-only generated identities.
 - Never run an aggressive RF test on public network settings, modify live deployed devices, factory-reset hardware or deploy OTA without the user's explicit authorization.
 - Keep a release changelog identifying wire-protocol changes, config migrations, non-interoperability and known limitations. Ensure inherited license notices are included in distribution.
