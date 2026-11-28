@@ -6,6 +6,8 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from run import RAW_RX, ROLES, Skip, decode_advert, decode_public_text, find_unacknowledged_deny, pin_keys, write_report
+from run import CONTACT_INFO, CONTACT_MESSAGE, CONTACT_MESSAGE_V3, Failure, decode_cli_reply
+from run import test_remote_acl as run_remote_acl
 
 
 class AdvertTest(unittest.TestCase):
@@ -61,6 +63,49 @@ class FilterEvidenceTest(unittest.TestCase):
         self.assertEqual(direct[1], [])
         self.assertEqual(relayed[1], ["abcd"])
         self.assertIsNone(decode_public_text(bytes((RAW_RX, 0, 0, 0x15, 0)) + payload[:-1]))
+
+
+class RemoteAclTest(unittest.TestCase):
+    def test_decodes_only_cli_replies_from_the_expected_contact(self):
+        key = bytes(range(32))
+        payload = key[:6] + bytes((0xff, 1)) + bytes(4) + b"OK"
+        self.assertEqual(decode_cli_reply(bytes((CONTACT_MESSAGE,)) + payload, key), "OK")
+        v3 = bytes((CONTACT_MESSAGE_V3, 0, 0, 0)) + payload
+        self.assertEqual(decode_cli_reply(v3, key), "OK")
+        self.assertIsNone(decode_cli_reply(v3[:-2], key))
+        self.assertIsNone(decode_cli_reply(v3, bytes(32)))
+        self.assertIsNone(decode_cli_reply(v3[:11] + bytes(1) + v3[12:], key))
+
+    def test_requires_explicit_denial_on_both_repeaters(self):
+        class Companion:
+            test_only_inbox = True
+
+            def __init__(self, name, denial):
+                self.name = name
+                self.denial = denial
+
+            def request(self, payload, expected):
+                if expected != CONTACT_INFO:
+                    raise AssertionError("expected contact lookup")
+                return bytes((CONTACT_INFO,)) + payload[1:]
+
+            def repeater_reply(self, repeater, command):
+                if command == b"rules status":
+                    return "rev=7 mode=normal"
+                if command != b"rules mode normal":
+                    raise AssertionError("unexpected remote command")
+                return self.denial
+
+        devices = {"ADMIN": Companion("ADMIN", "OK"),
+                   "ACTOR": Companion("ACTOR", "Err - write permission required")}
+        for index, role in enumerate(("R1", "R2"), 1):
+            devices[role] = SimpleNamespace(key=f"{index:064x}", cli=lambda command: "rev=7 mode=normal")
+        report = {"samples": []}
+        run_remote_acl(devices, report)
+        self.assertEqual([sample["repeater"] for sample in report["samples"]], ["R1", "R2"])
+        devices["ACTOR"].denial = "OK"
+        with self.assertRaisesRegex(Failure, "explicitly deny"):
+            run_remote_acl(devices, {"samples": []})
 
 
 class ReportTest(unittest.TestCase):
