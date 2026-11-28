@@ -43,6 +43,17 @@ python scripts/hil/run.py --suite actor --isolated-rf --report out/hil/actor
 
 The runner writes JSON, JUnit XML and Markdown reports. The JSON includes both repeaters' forwarding counters and path evidence from the observing Companion. It fingerprints the enrolled bench identities and omits passwords, private keys and private channel secrets. If temporary rule cleanup fails, the report lists the exact rule IDs to inspect and remove. A successfully deleted rule can leave a tombstone in current firmware.
 
+## SaveMeshcore comparison setup
+
+After installing the pinned SaveMeshcore builds on R1 and R2, keep the same four USB devices, known identity pins, and RF settings. Record the firmware provenance for the installed images in the local bench config. Run the baseline and Hardened checks with separate report paths so each report preserves the measured settings.
+
+```sh
+./scripts/hil/bench.sh preflight --baseline --report out/hil/savemeshcore-preflight
+./scripts/hil/bench.sh preflight --report out/hil/hardened-preflight
+```
+
+Run the second command after restoring the Hardened bench images. Inspect both reports for matching radio and inherited filter settings before the RF comparison. Baseline preflight recognizes the control firmware's CLI profile. The report identifies the configured images by the hashes entered by the operator. Both commands require all four devices and perform no RF trials or flashing.
+
 ## What the scenario verifies
 
 - Both repeaters forward ADMIN and ACTOR before the deny.
