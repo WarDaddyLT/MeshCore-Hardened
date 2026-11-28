@@ -128,6 +128,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #ifdef WITH_BRIDGE
   forward_traffic::Budget _bridge_forward_budget;
 #endif
+#ifndef HARDENED_NO_PRIVATE_NOTICES
   static constexpr size_t NoticeCapacity = 32;
   struct Notice {
     uint8_t key[PUB_KEY_SIZE];
@@ -138,6 +139,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   Notice _notices[NoticeCapacity]{};
   size_t _notice_count = 0;
   unsigned long _next_notice = 0;
+#endif
   size_t _sync_cursor = RuleStore::Capacity;
   size_t _sync_peer_cursor = 0;
   enum class CheckpointTransfer { Idle, Receiving, Sending };
@@ -154,6 +156,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   static constexpr size_t PolicyPeerCapacity = 8;
   PolicyPeerSession _policy_peers[PolicyPeerCapacity];
   size_t _subnet_mode_cursor = PolicyPeerCapacity;
+  uint32_t _onboarding_review_revision = 0;
+  uint8_t _onboarding_review_options = 0;
   struct SubnetStatusReply {
     uint8_t request[4];
     uint8_t revision[8];
@@ -235,12 +239,15 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool shouldExportToBridge(mesh::Packet* packet);
 #endif
   bool shouldDenyClient(const mesh::Identity& id);
+#ifndef HARDENED_NO_PRIVATE_NOTICES
   bool neighbourChannelUsable() const;
   void noteDirectNeighbour(const mesh::Identity& id, bool repeater);
   void sendNeighbourNotice();
   void handleNeighbourCommand(const char* command, char* reply, bool usb);
+#endif
   bool handleSyncCommand(const char* command, char* reply, bool usb, bool can_write);
   bool handleAuthorityCommand(const char* command, char* reply, bool usb, bool can_write);
+  void handleOnboardingCommand(const char* command, char* reply, bool usb, bool canWrite);
   bool handlePeerCommand(const char* command, char* reply, bool canWrite);
   static bool isPeerHandshake(const mesh::Packet& packet);
   void receivePeerHandshake(const mesh::Packet& packet);

@@ -246,7 +246,7 @@ Use `neighbours status` for `channel`, `observed`, and `pending`. Use `neighbour
 
 ## Share signed rules between repeaters
 
-A repeater assigned to a managed subnet with `rules subnet <name>` holds transit while it is onboarding. Check `rules onboarding` for its state. USB administration and authenticated policy exchange stay available. Verified onboarding commit is tracked separately. [Onboarding commit](https://github.com/WarDaddyLT/MeshCore-Hardened/issues/24)
+A repeater assigned to a managed subnet with `rules subnet <name>` holds transit while it is onboarding. Check `rules onboarding` for its state. To commission it without a peer, enter and inspect its starting policy through the admin CLI, run `rules onboarding review`, then commit the displayed token with `rules onboarding commit <review>`. A failed write or a changed policy leaves transit held. [Manual onboarding](docs/hardened-repeater-cli.md#manual-onboarding)
 
 To share a mode, configure the same subnet name on its member repeaters and grant the publishing repeater's full key with `rules publisher grant subnet <key>` on the publisher and receivers. Establish sessions with `rules peer connect subnet <peer-key>`. An administrator on the publisher can run `rules subnet mode normal`, `rules subnet mode protected`, or `rules subnet mode locked`. Receivers check the authenticated peer, the publisher's scope and signature, and the revision before committing the mode. Other subnets keep their own modes. The repeater applies the stricter of its local and committed subnet modes.
 
@@ -330,7 +330,7 @@ Use `rules checkpoint global` or `rules checkpoint region` on the originating re
 
 The room defaults off. Enable it only when you are ready to check the experimental room workflow. Android contact import, login, and reply display are still pending validation. The primary identity continues handling normal repeater forwarding and management.
 
-The compact LoRa-E5 Mini repeater build omits the optional room. The primary repeater CLI remains available.
+The compact LoRa-E5 Mini repeater build omits the optional room and private neighbour notices. The primary repeater CLI and ordinary repeater discovery remain available.
 
 | Command | Effect |
 | --- | --- |

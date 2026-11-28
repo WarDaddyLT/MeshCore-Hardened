@@ -845,18 +845,7 @@ bool MyMesh::handleSyncCommand(const char* command, char* reply, bool usb, bool 
 bool MyMesh::handleAuthorityCommand(const char* command, char* reply, bool usb, bool can_write) {
   const char* args;
   if (matchCommand(command, "onboarding", &args)) {
-    const bool wasOnboarding = _rules.onboarding();
-    if (!*args) {
-      const auto* name = _rules.scopeName(RuleStore::Subnet);
-      const char* state = !*name ? "unmanaged" : _rules.onboarding() ? "pending" : "active";
-      snprintf(reply, 150, "subnet=%s onboarding=%s transit=%s", *name ? name : "none", state,
-               _rules.transitAllowed() && !_prefs.disable_fwd ? "available" : "held");
-    } else if (!usb || !matchesValue(args, "start") || !_rules.startOnboarding()) {
-      strcpy(reply, "Err - use rules onboarding start over USB with a configured subnet");
-    } else {
-      if (!wasOnboarding) clearOutboundQueue();
-      strcpy(reply, "OK - onboarding pending; transit held");
-    }
+    handleOnboardingCommand(args, reply, usb, can_write);
     return true;
   }
   if (matchCommand(command, "subnet", &args)) {
@@ -876,6 +865,7 @@ bool MyMesh::handleAuthorityCommand(const char* command, char* reply, bool usb, 
       const bool changed = strcmp(_rules.scopeName(RuleStore::Subnet), args) != 0;
       const bool ok = usb && _rules.setScope(RuleStore::Subnet, args);
       if (ok && changed) {
+        _onboarding_review_revision = 0;
         for (auto& session : _policy_peers) {
           if (session.context() == PolicyPeerSession::Context::Subnet) session.reset();
         }
@@ -1013,6 +1003,7 @@ static bool isShare(const mesh::Packet *packet) {
   return false;
 }
 
+#ifndef HARDENED_NO_PRIVATE_NOTICES
 bool MyMesh::neighbourChannelUsable() const {
   static_assert(RuleStore::ChannelKeySize == CIPHER_KEY_SIZE, "Check notice channel key size");
   const uint8_t* key = _rules.neighbourChannel();
@@ -1121,6 +1112,7 @@ void MyMesh::handleNeighbourCommand(const char* command, char* reply, bool usb) 
   _notice_count = 0;
   strcpy(reply, "OK");
 }
+#endif
 
 void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32_t timestamp,
                           const uint8_t *app_data, size_t app_data_len) {
@@ -1137,6 +1129,7 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
     if (parser.isValid() && parser.getType() == ADV_TYPE_REPEATER) { // just keep neigbouring Repeaters
       putNeighbour(id, timestamp, packet->getSNR());
     }
+#ifndef HARDENED_NO_PRIVATE_NOTICES
     if (packet->received_over_radio && parser.isValid() && (!packet->isRouteFlood() || recv_pkt_region)) {
       if (parser.getType() == ADV_TYPE_REPEATER) noteDirectNeighbour(id, true);
       else if (parser.getType() == ADV_TYPE_CHAT
@@ -1144,6 +1137,7 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
         noteDirectNeighbour(id, false);
       }
     }
+#endif
   }
 }
 
@@ -1837,7 +1831,11 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 #endif
   if ((!client || client->isAdmin()) && matchCommand(command, "neighbours", &args)) {
+#ifndef HARDENED_NO_PRIVATE_NOTICES
     handleNeighbourCommand(args, reply, !client);
+#else
+    strcpy(reply, "Err - private notices unavailable in this build");
+#endif
     return;
   }
   if (matchCommand(command, "rules", &args)) {
@@ -1857,6 +1855,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
           _peer_epoch = 0;
           _peer_nonce_counter = 0;
           _next_peer_epoch_attempt = 0;
+          _onboarding_review_revision = 0;
           _probation.begin(_rules.probationState(), uptime_millis);
           _rules.restartFreezeTimer(uptime_millis);
         }
@@ -2049,7 +2048,9 @@ void MyMesh::loop() {
 #endif
 
   mesh::Mesh::loop();
+#ifndef HARDENED_NO_PRIVATE_NOTICES
   sendNeighbourNotice();
+#endif
   servicePolicyPeers();
   sendSubnetMode();
   sendSubnetStatus();

@@ -628,6 +628,19 @@ bool RuleStore::startOnboarding() {
   return commit();
 }
 
+uint32_t RuleStore::revision() const {
+  return decodeRevision(_state.revision);
+}
+
+bool RuleStore::commitOnboarding(uint32_t reviewedRevision) {
+  if (!forwardingAllowed() || !onboarding() || !_state.subnet[0]
+      || reviewedRevision != revision() || reviewedRevision == UINT32_MAX) return false;
+  _candidate = _state;
+  _candidate.onboarding = 0;
+  encodeRevision(_candidate.revision, reviewedRevision + 1);
+  return commit();
+}
+
 RuleStore::Authority* RuleStore::authorityFor(Snapshot& snapshot, const uint8_t* key) {
   Authority* free = nullptr;
   for (auto& entry : snapshot.authorities) {

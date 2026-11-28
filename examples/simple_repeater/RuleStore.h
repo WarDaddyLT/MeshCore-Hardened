@@ -56,6 +56,8 @@ public:
   bool onboarding() const { return _state.onboarding != 0; }
   bool transitAllowed() const { return forwardingAllowed() && !onboarding(); }
   bool startOnboarding();
+  uint32_t revision() const;
+  bool commitOnboarding(uint32_t reviewedRevision);
   void handleRecoveryCommand(const char* command, char* reply);
   Mode mode() const;
   const SubnetModeRecord& subnetModeRecord() const { return _state.subnet_mode; }
